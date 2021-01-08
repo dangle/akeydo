@@ -1,0 +1,13 @@
+[Unit]
+Description=VFIO-KVM service
+Before=libvirtd.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/vfio-kvm
+
+[Install]
+WantedBy=multi-user.target
