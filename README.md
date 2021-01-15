@@ -6,6 +6,17 @@ This service reads a list of devices to grab and creates new devices with the sa
 
 ## Installation
 
+### Arch Linux
+
+```shell
+git clone https://github.com/dangle/vfio-kvm-PKGBUILD.git
+cd vfio-kvm-PKGBUILD
+makepkg -s
+sudo pacman -U vfio-kvm-git*.zst
+```
+
+### Manual Installation
+
 ```shell
 cp config/dbus/vfio-kvm.xml /etc/dbus-1/system.d/
 cp vfio-kvm.py /usr/bin/vfio-kvm
