@@ -89,6 +89,21 @@ class ReplicatedDevice:
             f"No longer listening to device {_RAW}%s{_CLEAR}", self._source.path
         )
 
+    @property
+    def is_grabbed(self):
+        try:
+            self._guest.device.grab()
+        except IOError:
+            return True
+        self._guest.device.ungrab()
+        return False
+
+    def grab(self):
+        for value in (1, 0):
+            for key in self._manager.qemu_hotkey:
+                self._guest.write(evdev.ecodes.EV_KEY, key, value)
+        self._guest.syn()
+
     async def _replicate(self) -> None:
         self._init_device()
         try:
@@ -103,7 +118,8 @@ class ReplicatedDevice:
                     ):
                         is_toggle = True
                     elif is_toggle and not self._source.active_keys():
-                        time.sleep(0.01)  # 10ms delay to let key-up events process
+                        self._target.syn()  # Flush queued write events
+                        time.sleep(0.1)  # Wait for events to flush
                         is_toggle = False
                         self._manager.toggle()
         except asyncio.CancelledError:
@@ -121,6 +137,8 @@ class VfioKvmService(dbus.service.ServiceInterface):
     _GUEST = "guest"
 
     _DEFAULT_CONFIG_PATH = "/etc/vfio-kvm.yaml"
+    _DEFAULT_QEMU_HOTKEY = ("KEY_LEFTCTRL", "KEY_RIGHTCTRL")
+    _DEFAULT_HOTKEY = _DEFAULT_QEMU_HOTKEY
 
     _BUS_NAME = "vfio.kvm"
     _OBJ_PATH = "/vfio/kvm"
@@ -138,13 +156,18 @@ class VfioKvmService(dbus.service.ServiceInterface):
         self._last_change = None
         self._delay = datetime.timedelta(seconds=data.get("delay", 0))
         self._configure_hotkey(data.get("hotkey"))
+        self._configure_qemu_hotkey(data.get("qemu_hotkey"))
         await self._configure_dbus(bus or self._BUS_NAME, path or self._OBJ_PATH)
         self._configure_devices(data.get("devices"))
 
     def _configure_hotkey(self, keys):
         self._hotkey = (
-            evdev.ecodes.ecodes[key]
-            for key in keys or ("KEY_LEFTCTRL", "KEY_RIGHTCTRL")
+            evdev.ecodes.ecodes[key] for key in keys or self._DEFAULT_HOTKEY
+        )
+
+    def _configure_qemu_hotkey(self, keys):
+        self._qemu_hotkey = (
+            evdev.ecodes.ecodes[key] for key in keys or self._DEFAULT_QEMU_HOTKEY
         )
 
     def _configure_devices(self, devices):
@@ -162,9 +185,17 @@ class VfioKvmService(dbus.service.ServiceInterface):
     def _target_display(self) -> str:
         return f"{_HOST if self.target == self._HOST else _GUEST}{self._target.upper()}{_CLEAR}"
 
+    def _grab_all(self):
+        for device in self._devices:
+            device.grab()
+
     @functools.cached_property
     def hotkey(self) -> frozenset:
         return frozenset(self._hotkey)
+
+    @functools.cached_property
+    def qemu_hotkey(self) -> frozenset:
+        return frozenset(self._qemu_hotkey)
 
     @dbus.service.method("Toggle")
     def toggle(self) -> "s":
@@ -191,6 +222,8 @@ class VfioKvmService(dbus.service.ServiceInterface):
         if self._target != val and (
             not self._last_change or now >= self._last_change + self._delay
         ):
+            if val == self._GUEST and not all(d.is_grabbed for d in self._devices):
+                self._grab_all()
             self._last_change = now
             self._target = val
             logging.info("%s selected", self._target_display)
