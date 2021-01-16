@@ -1,18 +1,15 @@
 # vfio-kvm
 
-A systemd service that manages switching input devices between a VFIO host and guest.
+A systemd service that send a D-Bus signal when a QEMU `evdev` hotkey is pressed.
 
-This service reads a list of devices to grab and creates new devices with the same id but prefixed with `host-` and `guest-`. `evdev` events are captured and forwarded to the currently selected device.
+This service reads a list of devices to grab and creates new devices with the same id but prefixed with _host-_ and _guest-_. `evdev` events are captured and forwarded to the currently selected device.
 
 ## Installation
 
 ### Arch Linux
 
 ```shell
-git clone https://github.com/dangle/vfio-kvm-PKGBUILD.git
-cd vfio-kvm-PKGBUILD
-makepkg -s
-sudo pacman -U vfio-kvm-git*.zst
+yay -Sy vfio-kvm-git
 ```
 
 ### Manual Installation
@@ -50,6 +47,16 @@ devices:
   - /dev/input/by-id/usb-kbd
   - /dev/input/by-id/usb-mouse
 ```
+
+## Switching Monitors on Hotkey
+
+This service sends a D-Bus signal that can be monitored in order to run custom commands when the QEMU hotkey is pressed. To monitor the signal from a shell script use `dbus-monitor`.
+
+```shell
+dbus-monitor --system "type='signal',sender='vfio.kvm'"
+```
+
+To see a [complete example](examples/ddccontrol-client.sh) that triggers `ddccontrol`, look in the [examples](examples/) folder.
 
 ## Troubleshooting
 
