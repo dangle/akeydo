@@ -150,7 +150,11 @@ class VfioKvmService(dbus.service.ServiceInterface):
 
     async def __init__(self, config=None, bus=None, path=None) -> None:
         super().__init__(bus or self._BUS_NAME)
-        with open(config or self._DEFAULT_CONFIG_PATH) as fp:
+        config = config or self._DEFAULT_CONFIG_PATH
+        if not os.path.isfile(config):
+            logging.error('Configuration file "%s" not found', config)
+            sys.exit(6)
+        with open(config) as fp:
             data = yaml.safe_load(fp)
         self._target = self._HOST
         self._last_change = None
@@ -171,6 +175,9 @@ class VfioKvmService(dbus.service.ServiceInterface):
         )
 
     def _configure_devices(self, devices):
+        if not devices:
+            logging.error("No devices configured")
+            sys.exit(6)
         self.target = self._HOST
         self._devices = [ReplicatedDevice(device, self) for device in devices or ()]
 
@@ -248,5 +255,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().create_task(main())
-    asyncio.get_event_loop().run_forever()
+    task = asyncio.get_event_loop().create_task(main())
+    try:
+        asyncio.get_event_loop().run_forever()
+    except SystemExit:
+        task.exception()
+        raise
