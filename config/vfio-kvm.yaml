@@ -1,0 +1,5 @@
+hotkey:
+  - KEY_LEFTCTRL
+  - KEY_RIGHTCTRL
+delay: 0
+devices:
