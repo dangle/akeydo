@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 import sys
+import time
 
 import dbus_next as dbus
 import evdev
@@ -102,6 +103,7 @@ class ReplicatedDevice:
                     ):
                         is_toggle = True
                     elif is_toggle and not self._source.active_keys():
+                        time.sleep(0.01)  # 10ms delay to let key-up events process
                         is_toggle = False
                         self._manager.toggle()
         except asyncio.CancelledError:
