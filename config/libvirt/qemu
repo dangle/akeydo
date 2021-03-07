@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+NAME="${1}"
+OPERATION="${2}"
+SUB_OPERATION="${3}"
+EXTRA_OPERATION="${4}"
+XML_CONFIG=$(</dev/stdin)
+
+RESPONSE=$(dbus-send \
+    --system \
+    --print-reply \
+    --type="method_call" \
+    --dest=vfio.kvm \
+    /vfio/kvm \
+    vfio.kvm.${OPERATION^} \
+    string:"${NAME}" \
+    string:"${SUB_OPERATION}" \
+    string:"${EXTRA_OPERATION}" \
+    string:"${XML_CONFIG}")
+
+if [[ $? == 0 && "${RESPONSE}" == *"boolean false"* ]]; then
+    exit 1
+fi

@@ -14,13 +14,6 @@ import evdev
 import yaml
 
 
-_BOLD = "\033[1m"
-_HOST = "\033[1;33m"
-_GUEST = "\033[1;32m"
-_RAW = "\033[1;36m"
-_CLEAR = "\033[0m"
-
-
 class ReplicatedDevice:
     def __init__(self, source: str, manager) -> None:
         self._name = os.path.basename(source)
@@ -52,17 +45,17 @@ class ReplicatedDevice:
         return getattr(self, f"_{self._manager.target}")
 
     def _link(self) -> None:
-        logging.info(f"Creating host device {_HOST}%s{_CLEAR}", self._host_path)
+        logging.info(f"Creating host device %s", self._host_path)
         os.symlink(self._host.device, self._host_path)
-        logging.info(f"Creating guest device {_GUEST}%s{_CLEAR}", self._guest_path)
+        logging.info(f"Creating guest device %s", self._guest_path)
         os.symlink(self._guest.device, self._guest_path)
 
     def _unlink(self) -> None:
         if os.path.islink(self._host_path):
-            logging.info(f"Removing host device {_GUEST}%s{_CLEAR}", self._host_path)
+            logging.info(f"Removing host device %s", self._host_path)
             os.unlink(self._host_path)
         if os.path.islink(self._guest_path):
-            logging.info(f"Removing guest device {_GUEST}%s{_CLEAR}", self._guest_path)
+            logging.info(f"Removing guest device %s", self._guest_path)
             os.unlink(self._guest_path)
 
     def _init_device(self):
@@ -73,21 +66,17 @@ class ReplicatedDevice:
         try:
             self._source.grab()
         except IOError as e:
-            logging.exception(
-                f"Unable to grab device {_RAW}%s{_CLEAR}", self._source.path
-            )
+            logging.exception(f"Unable to grab device %s", self._source.path)
             asyncio.get_event_loop().stop()
             sys.exit(1)
-        logging.info(f"Listening to device {_RAW}%s{_CLEAR}", self._source.path)
+        logging.info(f"Listening to device %s", self._source.path)
 
     def _cleanup_device(self):
         self._source.ungrab()
         self._unlink()
         self._host.close()
         self._guest.close()
-        logging.info(
-            f"No longer listening to device {_RAW}%s{_CLEAR}", self._source.path
-        )
+        logging.info(f"No longer listening to device %s", self._source.path)
 
     @property
     def is_grabbed(self):
@@ -186,11 +175,13 @@ class VfioKvmService(dbus.service.ServiceInterface):
             bus_type=dbus.constants.BusType.SYSTEM
         ).connect()
         _bus.export(path, self)
+        logging.debug("Requesting bus name %s", _bus.unique_name)
         await _bus.request_name(bus)
+        logging.debug("Bus name %s granted", _bus.unique_name)
 
     @property
     def _target_display(self) -> str:
-        return f"{_HOST if self.target == self._HOST else _GUEST}{self._target.upper()}{_CLEAR}"
+        return self._target.upper()
 
     def _grab_all(self):
         for device in self._devices:
@@ -208,6 +199,11 @@ class VfioKvmService(dbus.service.ServiceInterface):
     def toggle(self) -> "s":
         self.target = self._HOST if self.target == self._GUEST else self._GUEST
         return self.target
+
+    @dbus.service.method("Prepare")
+    def prepare(self, vm_name: "s", sub_op: "s", extra_op: "s", xml_config: "s") -> "b":
+        print(xml_config)
+        return True
 
     @dbus.service.method("Start")
     def start(self):
@@ -240,7 +236,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
 async def main() -> None:
     logging.basicConfig(
         level=os.environ.get("LOGLEVEL", "INFO").upper(),
-        format=f"{_BOLD}[%(levelname)s]{_CLEAR} %(message)s",
+        format="[%(levelname)s] %(message)s",
     )
     manager = await VfioKvmService()
 
