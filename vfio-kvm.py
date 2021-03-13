@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
+import xml.etree.ElementTree as xml
 import asyncio
-import datetime
+import collections
 import functools
 import logging
 import os
@@ -14,6 +15,172 @@ import evdev
 import yaml
 
 
+VmConfig = collections.namedtuple("VmConfig", ("devices", "cpu", "memory", "hugepages"))
+
+
+class VfioKvmService(dbus.service.ServiceInterface):
+    _HOST = "host"
+    _GUEST = "guest"
+
+    _DEFAULT_CONFIG_PATH = "/etc/vfio-kvm.yaml"
+    _DEFAULT_QEMU_HOTKEY = ("KEY_LEFTCTRL", "KEY_RIGHTCTRL")
+    _DEFAULT_HOTKEY = _DEFAULT_QEMU_HOTKEY
+
+    _BUS_NAME = "vfio.kvm"
+    _OBJ_PATH = "/vfio/kvm"
+
+    async def __new__(cls, *args, **kwargs) -> dbus.service.ServiceInterface:
+        instance = super().__new__(cls)
+        await instance.__init__(*args, **kwargs)
+        return instance
+
+    async def __init__(self, config=None, bus=None, path=None) -> None:
+        super().__init__(bus or self._BUS_NAME)
+        config = config or self._DEFAULT_CONFIG_PATH
+        data = {}
+        if os.path.isfile(config):
+            with open(config) as fp:
+                data = yaml.safe_load(fp)
+        self._target = self._HOST
+        self._configure_hotkey(data.get("hotkey"))
+        self._configure_qemu_hotkey(data.get("qemu_hotkey"))
+        await self._configure_dbus(bus or self._BUS_NAME, path or self._OBJ_PATH)
+        self._target = self._HOST
+        self._devices = {}
+        logging.info("Listening for libvirtd events")
+
+    def _configure_hotkey(self, keys):
+        self._hotkey = (
+            evdev.ecodes.ecodes[key] for key in keys or self._DEFAULT_HOTKEY
+        )
+
+    def _configure_qemu_hotkey(self, keys):
+        self._qemu_hotkey = (
+            evdev.ecodes.ecodes[key] for key in keys or self._DEFAULT_QEMU_HOTKEY
+        )
+
+    def _configure_devices(self, devices):
+        if not devices:
+            logging.error("No devices configured")
+            sys.exit(6)
+        self.target = self._HOST
+        self._devices = [ReplicatedDevice(device, self) for device in devices or ()]
+
+    async def _configure_dbus(self, bus, path):
+        _bus = await dbus.aio.MessageBus(
+            bus_type=dbus.constants.BusType.SYSTEM
+        ).connect()
+        _bus.export(path, self)
+        logging.debug("Requesting bus name %s", _bus.unique_name)
+        await _bus.request_name(bus)
+        logging.debug("Bus name %s granted", _bus.unique_name)
+
+    def _grab_all(self):
+        for device in self._devices:
+            device.grab()
+
+    def _parse_xml(self, xml_config: str) -> VmConfig:
+        root = xml.fromstring(xml_config)
+        cpu_pinnings = [
+            int(e.get("cpuset")) for e in root.findall(".//cputune/vcpupin")
+        ]
+        memory = int(root.findtext(".//memory"))
+        hugepages = root.find(".//memoryBacking/hugepages") is not None
+        devices = [
+            param[6:]
+            for e in root.findall(
+                ".//qemu:commandline/qemu:arg",
+                {"qemu": "http://libvirt.org/schemas/domain/qemu/1.0"},
+            )
+            if "evdev=" in e.get("value")
+            for param in e.get("value").split(",")
+            if param.startswith("evdev=")
+        ]
+        return VmConfig(devices, cpu_pinnings, memory, hugepages)
+
+    @functools.cached_property
+    def hotkey(self) -> frozenset:
+        return frozenset(self._hotkey)
+
+    @functools.cached_property
+    def qemu_hotkey(self) -> frozenset:
+        return frozenset(self._qemu_hotkey)
+
+    @dbus.service.dbus_property(name="Target")
+    def target(self) -> "s":
+        return self._target
+
+    @target.setter
+    def target(self, val: "s"):
+        if val == self._GUEST and not all(d.is_grabbed for d in self._devices):
+            self._grab_all()
+        self._target = val
+        logging.info("%s selected", self._target.upper())
+        self.emit_properties_changed({"Target": self._target})
+
+    @dbus.service.method("Start")
+    def start(self):
+        for device in self._devices:
+            device.start()
+
+    @dbus.service.method("Stop")
+    def stop(self):
+        for device in self._devices:
+            device.stop()
+
+    @dbus.service.method("Toggle")
+    def toggle(self) -> "s":
+        self.target = self._HOST if self.target == self._GUEST else self._GUEST
+        return self.target
+
+    @dbus.service.method("Prepare")
+    def prepare(self, vm_name: "s", sub_op: "s", extra_op: "s", xml_config: "s") -> "b":
+        logging.info("VM %s starting up", vm_name)
+        logging.debug("libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config)
+        config = self._parse_xml(xml_config)
+        self._pin_cpus(config.cpu)
+        self._allocate_hugepages(config.memory, config.hugepages)
+        self._create_devices(vm_name, config.devices)
+        return True
+
+    def _pin_cpus(self, cpu):
+        logging.info("Pinning CPUs: %s", cpu)
+
+    def _allocate_hugepages(self, memory, hugepages):
+        if hugepages:
+            logging.info("Allocating hugepages: %d bytes", memory)
+
+    def _create_devices(self, vm_name, devices):
+        for device in devices:
+            logging.info(
+                "Creating device %s/%s-%s",
+                os.path.join(os.sep, "dev", "input", "by-id"),
+                vm_name,
+                os.path.basename(device),
+            )
+
+    @dbus.service.method("Release")
+    def release(self, vm_name: "s", sub_op: "s", extra_op: "s", xml_config: "s") -> "b":
+        logging.info("VM %s shutting down", vm_name)
+        logging.debug("libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config)
+        config = self._parse_xml(xml_config)
+        self._destroy_devices(vm_name, config.devices)
+        self._deallocate_hugepages(config.memory, config.hugepages)
+        self._unpin_cpus(config.cpu)
+        return True
+
+    def _unpin_cpus(self, cpu):
+        logging.info("Unpinning CPUs: %s", cpu)
+
+    def _deallocate_hugepages(self, memory, hugepages):
+        if hugepages:
+            logging.info("Deallocating hugepages: %d bytes", memory)
+
+    def _destroy_devices(self, vm_name, devices):
+        for device in devices:
+            logging.info("Destroying device %s-%s", vm_name, device)
+
+
 class ReplicatedDevice:
     def __init__(self, source: str, manager) -> None:
         self._name = os.path.basename(source)
@@ -22,6 +189,7 @@ class ReplicatedDevice:
         self._task = None
         self._host = None
         self._guest = None
+        self._devices = {}
 
     def _get_device_path(self, target) -> str:
         return os.path.join(
@@ -119,118 +287,6 @@ class ReplicatedDevice:
 
     def stop(self) -> None:
         self._task.cancel()
-
-
-class VfioKvmService(dbus.service.ServiceInterface):
-    _HOST = "host"
-    _GUEST = "guest"
-
-    _DEFAULT_CONFIG_PATH = "/etc/vfio-kvm.yaml"
-    _DEFAULT_QEMU_HOTKEY = ("KEY_LEFTCTRL", "KEY_RIGHTCTRL")
-    _DEFAULT_HOTKEY = _DEFAULT_QEMU_HOTKEY
-
-    _BUS_NAME = "vfio.kvm"
-    _OBJ_PATH = "/vfio/kvm"
-
-    async def __new__(cls, *args, **kwargs) -> dbus.service.ServiceInterface:
-        instance = super().__new__(cls)
-        await instance.__init__(*args, **kwargs)
-        return instance
-
-    async def __init__(self, config=None, bus=None, path=None) -> None:
-        super().__init__(bus or self._BUS_NAME)
-        config = config or self._DEFAULT_CONFIG_PATH
-        if not os.path.isfile(config):
-            logging.error('Configuration file "%s" not found', config)
-            sys.exit(6)
-        with open(config) as fp:
-            data = yaml.safe_load(fp)
-        self._target = self._HOST
-        self._last_change = None
-        self._delay = datetime.timedelta(seconds=data.get("delay", 0))
-        self._configure_hotkey(data.get("hotkey"))
-        self._configure_qemu_hotkey(data.get("qemu_hotkey"))
-        await self._configure_dbus(bus or self._BUS_NAME, path or self._OBJ_PATH)
-        self._configure_devices(data.get("devices"))
-
-    def _configure_hotkey(self, keys):
-        self._hotkey = (
-            evdev.ecodes.ecodes[key] for key in keys or self._DEFAULT_HOTKEY
-        )
-
-    def _configure_qemu_hotkey(self, keys):
-        self._qemu_hotkey = (
-            evdev.ecodes.ecodes[key] for key in keys or self._DEFAULT_QEMU_HOTKEY
-        )
-
-    def _configure_devices(self, devices):
-        if not devices:
-            logging.error("No devices configured")
-            sys.exit(6)
-        self.target = self._HOST
-        self._devices = [ReplicatedDevice(device, self) for device in devices or ()]
-
-    async def _configure_dbus(self, bus, path):
-        _bus = await dbus.aio.MessageBus(
-            bus_type=dbus.constants.BusType.SYSTEM
-        ).connect()
-        _bus.export(path, self)
-        logging.debug("Requesting bus name %s", _bus.unique_name)
-        await _bus.request_name(bus)
-        logging.debug("Bus name %s granted", _bus.unique_name)
-
-    @property
-    def _target_display(self) -> str:
-        return self._target.upper()
-
-    def _grab_all(self):
-        for device in self._devices:
-            device.grab()
-
-    @functools.cached_property
-    def hotkey(self) -> frozenset:
-        return frozenset(self._hotkey)
-
-    @functools.cached_property
-    def qemu_hotkey(self) -> frozenset:
-        return frozenset(self._qemu_hotkey)
-
-    @dbus.service.method("Toggle")
-    def toggle(self) -> "s":
-        self.target = self._HOST if self.target == self._GUEST else self._GUEST
-        return self.target
-
-    @dbus.service.method("Prepare")
-    def prepare(self, vm_name: "s", sub_op: "s", extra_op: "s", xml_config: "s") -> "b":
-        print(xml_config)
-        return True
-
-    @dbus.service.method("Start")
-    def start(self):
-        for device in self._devices:
-            device.start()
-
-    @dbus.service.method("Stop")
-    def stop(self):
-        for device in self._devices:
-            device.stop()
-
-    @dbus.service.dbus_property(name="Target")
-    def target(self) -> "s":
-        return self._target
-
-    @target.setter
-    def target(self, val: "s"):
-        now = datetime.datetime.now()
-        if self._target != val and (
-            not self._last_change or now >= self._last_change + self._delay
-        ):
-            if val == self._GUEST and not all(d.is_grabbed for d in self._devices):
-                self._grab_all()
-            self._last_change = now
-            self._target = val
-            logging.info("%s selected", self._target_display)
-            self.emit_properties_changed({"Target": self._target})
 
 
 async def main() -> None:
