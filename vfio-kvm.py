@@ -41,6 +41,8 @@ class VfioKvmService(dbus.service.ServiceInterface):
                 data = yaml.safe_load(fp)
         self._targets = [None]
         self._target = None
+        self._manage_cpu = data.get("manage_cpu", False)
+        self._manage_hugepages = data.get("manage_hugepages", False)
         self._configure_hotkey(data.get("hotkey"))
         self._configure_qemu_hotkey(data.get("qemu_hotkey"))
         await self._configure_dbus(bus or self._BUS_NAME, path or self._OBJ_PATH)
@@ -134,12 +136,12 @@ class VfioKvmService(dbus.service.ServiceInterface):
         return True
 
     def _pin_cpus(self, cpu):
-        if not cpu:
+        if not self._manage_cpu or not cpu:
             return
         logging.info("Pinning CPUs: %s", ", ".join(str(c) for c in sorted(cpu)))
 
     def _allocate_hugepages(self, gb_pages, mb_pages):
-        if not gb_pages and not mb_pages:
+        if not self._manage_hugepages or (not gb_pages and not mb_pages):
             return
         logging.info(
             "Allocating %d 1G hugepages and %d 2M hugepages", gb_pages, mb_pages
@@ -176,12 +178,12 @@ class VfioKvmService(dbus.service.ServiceInterface):
         return True
 
     def _unpin_cpus(self, cpu):
-        if not cpu:
+        if not self._manage_cpu or not cpu:
             return
         logging.info("Unpinning CPUs: %s", ", ".join(str(c) for c in sorted(cpu)))
 
     def _deallocate_hugepages(self, gb_pages, mb_pages):
-        if not gb_pages and not mb_pages:
+        if not self._manage_hugepages or (not gb_pages and not mb_pages):
             return
         logging.info(
             "Deallocating %d 1G hugepages and %d 2M hugepages", gb_pages, mb_pages
