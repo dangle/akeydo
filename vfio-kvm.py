@@ -38,7 +38,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
         data = {}
         if os.path.isfile(config):
             with open(config) as fp:
-                data = yaml.safe_load(fp)
+                data = yaml.safe_load(fp) or {}
         self._targets = [None]
         self._target = None
         self._manage_cpu = data.get("manage_cpu", False)
