@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 
-import xml.etree.ElementTree as xml
 import asyncio
-import collections
+import dataclasses
 import functools
 import logging
 import os
 import signal
 import stat
+import typing
+import xml.etree.ElementTree as xml
 
 import dbus_next as dbus
 import evdev
 import yaml
 
 
-VmConfig = collections.namedtuple(
-    "VmConfig", ("devices", "cpu", "hugepages1G", "hugepages2M")
-)
+@dataclasses.dataclass
+class VmOptions:
+    hotkey: typing.Tuple[int] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class VmConfig:
+    devices: typing.Tuple[str] = dataclasses.field(default_factory=list)
+    cpu: typing.Tuple[int] = dataclasses.field(default_factory=list)
+    hugepages1G: int = 0
+    hugepages2M: int = 0
 
 
 class VfioKvmService(dbus.service.ServiceInterface):
@@ -34,20 +43,39 @@ class VfioKvmService(dbus.service.ServiceInterface):
 
     async def __init__(self, config=None, bus=None, path=None) -> None:
         super().__init__(bus or self._BUS_NAME)
-        config = config or self._DEFAULT_CONFIG_PATH
-        data = {}
-        if os.path.isfile(config):
-            with open(config) as fp:
-                data = yaml.safe_load(fp) or {}
+        self._vm_options = {}
+        self._devices = {}
         self._targets = [None]
         self._target = None
+        self._manage_cpu = False
+        self._manage_hugepages = False
+        self._parse_config(config=config or self._DEFAULT_CONFIG_PATH)
+        await self._configure_dbus(bus or self._BUS_NAME, path or self._OBJ_PATH)
+        logging.info("Listening for libvirtd events")
+
+    def _parse_config(self, config):
+        config = config or self._DEFAULT_CONFIG_PATH
+        if not os.path.isfile(config):
+            return
+        with open(config) as fp:
+            data = yaml.safe_load(fp) or {}
+        if "host" in data:
+            self._vm_options[None] = self._parse_vm_options(data["host"])
+        self._vm_options.update(
+            {
+                key: self._parse_vm_options(value)
+                for key, value in data.get("vm", {}).items()
+            }
+        )
         self._manage_cpu = data.get("manage_cpu", False)
         self._manage_hugepages = data.get("manage_hugepages", False)
         self._configure_hotkey(data.get("hotkey"))
         self._configure_qemu_hotkey(data.get("qemu_hotkey"))
-        await self._configure_dbus(bus or self._BUS_NAME, path or self._OBJ_PATH)
-        self._devices = {}
-        logging.info("Listening for libvirtd events")
+
+    def _parse_vm_options(self, vm):
+        return VmOptions(
+            (evdev.ecodes.ecodes[key] for key in vm.get("hotkey")),
+        )
 
     def _configure_hotkey(self, keys):
         self._hotkey = (
@@ -70,15 +98,15 @@ class VfioKvmService(dbus.service.ServiceInterface):
 
     def _parse_xml(self, xml_config: str) -> VmConfig:
         root = xml.fromstring(xml_config)
-        cpu_pinnings = [
+        cpu_pinnings = (
             int(e.get("cpuset")) for e in root.findall(".//cputune/vcpupin")
-        ]
+        )
         hugepages = root.find(".//memoryBacking/hugepages") is not None
         memory = int(root.findtext(".//memory"))
         mem_in_mb = memory // 1024
         gb_pages = mem_in_mb // 1024 if hugepages else 0
         mb_pages = mem_in_mb % gb_pages if hugepages else 0
-        devices = [
+        devices = (
             param[6:]
             for e in root.findall(
                 ".//qemu:commandline/qemu:arg",
@@ -87,7 +115,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
             if "evdev=" in e.get("value")
             for param in e.get("value").split(",")
             if param.startswith("evdev=")
-        ]
+        )
         return VmConfig(devices, cpu_pinnings, gb_pages, mb_pages)
 
     @functools.cached_property
@@ -111,6 +139,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
         display = val or "host device"
         if val == self._target:
             logging.debug("%s selected but already on %s", display, display)
+            return
         logging.info("%s selected", display)
         self._target = val
         for device in self._devices.values():
