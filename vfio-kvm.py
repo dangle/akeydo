@@ -7,6 +7,7 @@ import functools
 import logging
 import os
 import signal
+import stat
 
 import dbus_next as dbus
 import evdev
@@ -39,8 +40,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
             with open(config) as fp:
                 data = yaml.safe_load(fp)
         self._targets = [None]
-        self._index = 0
-        self._target = self._targets[self._index]
+        self._target = None
         self._configure_hotkey(data.get("hotkey"))
         self._configure_qemu_hotkey(data.get("qemu_hotkey"))
         await self._configure_dbus(bus or self._BUS_NAME, path or self._OBJ_PATH)
@@ -106,16 +106,20 @@ class VfioKvmService(dbus.service.ServiceInterface):
 
     @target.setter
     def target(self, val: "s"):
-        logging.info("%s selected", val or "host device")
+        display = val or "host device"
+        if val == self._target:
+            logging.debug("%s selected but already on %s", display, display)
+        logging.info("%s selected", display)
         self._target = val
         for device in self._devices.values():
             device.grab()
-        self.emit_properties_changed({"Target": self._target or "host device"})
+        self.emit_properties_changed({"Target": display})
 
     @dbus.service.method("Toggle")
     def toggle(self) -> "s":
-        self._index = (self._index + 1) % len(self._targets)
-        self.target = self._targets[self._index]
+        self.target = self._targets[
+            (self._targets.index(self._target) + 1) % len(self._targets)
+        ]
         return self.target
 
     @dbus.service.method("Prepare")
@@ -158,15 +162,17 @@ class VfioKvmService(dbus.service.ServiceInterface):
     @dbus.service.method("Release")
     def release(self, vm_name: "s", sub_op: "s", extra_op: "s", xml_config: "s") -> "b":
         if vm_name not in self._targets:
-            logging.warning("Attempted to release devices for unmanaged VM %s", vm_name)
+            logging.debug("Attempted to release devices for unmanaged VM %s", vm_name)
             return False
         logging.info("VM %s shutting down", vm_name)
         logging.debug("libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config)
         config = self._parse_xml(xml_config)
+        self._targets.remove(vm_name)
+        if self._target == vm_name:
+            self.target = None
         self._destroy_devices(vm_name, config.devices)
         self._deallocate_hugepages(config.hugepages1G, config.hugepages2M)
         self._unpin_cpus(config.cpu)
-        self._targets.remove(vm_name)
         return True
 
     def _unpin_cpus(self, cpu):
@@ -182,6 +188,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
         )
 
     def _destroy_devices(self, vm_name, devices):
+        is_last = len(self._targets) == 1
         for guest_source in devices:
             source = os.path.join(
                 os.sep,
@@ -190,25 +197,26 @@ class VfioKvmService(dbus.service.ServiceInterface):
                 "by-id",
                 os.path.basename(guest_source)[len(vm_name) + 1 :],
             )
-            if source not in self._devices:
+            if source in self._devices:
+                device = self._devices.pop(source)
+                device.remove(vm_name)
+            else:
                 logging.warning(
                     "Attempted to destroy non-existent device %s", guest_source
                 )
-            else:
-                device = self._devices[source]
-                device.remove(vm_name)
 
 
 class ReplicatedDevice:
     def __init__(self, source: str, manager) -> None:
+        if not os.path.exists(source) or not stat.S_ISCHR(os.stat(source).st_mode):
+            raise IOError("No such device: %s", source)
         self._name = os.path.basename(source)
-        self._source = evdev.InputDevice(source)
+        self._source_path = source
+        self._source = None
         self._manager = manager
         self._targets = {}
         self._grab_task = None
         self._replicate_task = None
-        self._create_device("host", key=None)
-        self.start()
 
     def _get_device_path(self, target):
         return os.path.join(
@@ -230,12 +238,15 @@ class ReplicatedDevice:
         os.symlink(device.device, path)
 
     def _destroy_device(self, target, *, key=False):
+        index = key if key is not False else target
+        if index not in self._targets:
+            return
         path = self._get_device_path(target)
+        logging.info(f"Destroying {target} device %s", path)
         if os.path.islink(path):
             logging.debug(f"Removing symlink %s", path)
             os.unlink(path)
-        self._targets[key if key is not False else target].close()
-        # del self._targets[key if key is not False else target]
+        self._targets.pop(index).close()
 
     async def _grab_source(self):
         while 1:
@@ -291,6 +302,9 @@ class ReplicatedDevice:
         self._target.syn()
 
     def start(self) -> None:
+        if not self._source:
+            self._source = evdev.InputDevice(self._source_path)
+            self._create_device("host", key=None)
         if not self._grab_task:
             self._grab_task = asyncio.create_task(self._grab_source())
         if not self._replicate_task:
@@ -299,17 +313,19 @@ class ReplicatedDevice:
     def stop(self) -> None:
         self._replicate_task.cancel()
         self._grab_task.cancel()
+        for target in frozenset(self._targets.keys()):
+            self._destroy_device(target if target else "host", key=target)
         try:
             self._source.ungrab()
+            logging.info(f"Ungrabbed device %s", self._source.path)
+            self._source.close()
+            self._source = None
         except IOError:
             pass
-        for target in frozenset(self._targets):
-            self._destroy_device(target if target else "host", key=target)
-        logging.info(f"Ungrabbed device %s", self._source.path)
 
     def add(self, vm_name: str) -> None:
-        self._create_device(vm_name)
         self.start()
+        self._create_device(vm_name)
 
     def remove(self, vm_name: str) -> None:
         self._destroy_device(vm_name)
