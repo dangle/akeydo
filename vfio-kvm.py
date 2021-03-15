@@ -229,7 +229,6 @@ class VfioKvmService(dbus.service.ServiceInterface):
         )
 
     def _destroy_devices(self, vm_name, devices):
-        is_last = len(self._targets) == 1
         for guest_source in devices:
             source = os.path.join(
                 os.sep,
@@ -313,42 +312,48 @@ class ReplicatedDevice:
         return self._targets.get(self._manager.target)
 
     async def _replicate(self) -> None:
+        is_toggle = False
+        hotkey_triggered = None
+
+        async def handle_toggle(active_keys):
+            nonlocal is_toggle
+            if event.value == 1 and active_keys == self._manager.hotkey:
+                is_toggle = True
+            elif is_toggle and not self._source.active_keys():
+                self._target.syn()
+                await asyncio.sleep(0.1)
+                is_toggle = False
+                self._manager.toggle()
+
+        async def handle_hotkeys(active_keys):
+            nonlocal hotkey_triggered
+            if event.value == 1 and active_keys in self._hotkeys:
+                hotkey_triggered = active_keys
+            elif hotkey_triggered and not self._source.active_keys():
+                self._target.syn()
+                await asyncio.sleep(0.1)
+                self._manager.target = self._hotkeys[hotkey_triggered]
+                hotkey_triggered = None
+
         try:
-            is_toggle = False
-            hotkey_triggered = None
             async for event in self._source.async_read_loop():
                 self._target.write_event(event)
                 if event.type == evdev.ecodes.EV_KEY:
                     active_keys = frozenset(self._source.active_keys())
-                    if event.value == 1 and active_keys == self._manager.hotkey:
-                        is_toggle = True
-                    elif is_toggle and not self._source.active_keys():
-                        self._target.syn()  # Flush queued write events
-                        await asyncio.sleep(0.1)  # Wait for events to flush
-                        is_toggle = False
-                        self._manager.toggle()
-                    elif event.value == 1 and active_keys in self._hotkeys:
-                        hotkey_triggered = active_keys
-                    elif hotkey_triggered and not self._source.active_keys():
-                        self._target.syn()  # Flush queued write events
-                        await asyncio.sleep(0.1)  # Wait for events to flush
-                        self._manager.target = self._hotkeys[hotkey_triggered]
-                        hotkey_triggered = None
+                    await handle_toggle(active_keys)
+                    await handle_hotkeys(active_keys)
         except asyncio.CancelledError:
             return
 
-    @property
-    def _is_grabbed(self):
+    def grab(self):
+        if not self._manager.target:
+            return
         try:
             self._target.device.grab()
-        except IOError:
-            return True
-        self._target.device.ungrab()
-        return False
-
-    def grab(self):
-        if not self._manager.target or self._is_grabbed:
+            self._target.device.ungrab()
             return
+        except IOError:
+            pass
         logging.debug("Grabbing device %s", self._get_device_path(self._manager.target))
         for value in (1, 0):
             for key in self._manager.qemu_hotkey:
