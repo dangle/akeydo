@@ -1,6 +1,32 @@
 #!/usr/bin/env python3
+"""
+A service that reads libvirtd events from a hook and manages device creation and
+deletion, replication, CPU pinning, and hugepages allocation.
+
+Classes:
+    DbusTypes: An enumeration of types used by dbus_next.
+    VmOptions: A dataclass containing options for virtual machines configured at
+        launch and not in the XML configuration of the virtual machine.
+    VmConfig: A dataclass containing the relevant parsed sections of a virtual
+        machine's XML configuration during the virtual machine's start.
+    VfioKvmService: The service that manages hardware alterations and
+        replications as well as signaling when a new virtual machine has focus.
+    ReplicatedDevice: Manages a real system device and creates virtual devices
+        that can receive input only when a specific virtual machine (or the
+        host) has focus.
+
+Type Aliases:
+    Hotkey: A structure describing a sequence of Linux-defined values
+        representing key presses used to trigger an action.
+
+Functions:
+    main: Called when this script is run as an executable. It creates the
+        services and handles exceptions in the event loop.
+"""
+
 
 from typing import (
+    Any,
     Dict,
     FrozenSet,
     List,
@@ -22,25 +48,50 @@ import evdev
 import yaml
 
 
-Hotkey = FrozenSet[int]
+Hotkey = FrozenSet[int]  # A hashable representation of a hotkey.
 
 
 class DbusTypes:
+    """Enumeration to represent the strings used by dbus_next."""
+
     Boolean = "b"
     String = "s"
 
 
 @dataclasses.dataclass
 class VmOptions:
+    """Dataclass to hold data virtual machine-specific options."""
+
     hotkey: Hotkey = dataclasses.field(default_factory=frozenset)
 
 
 @dataclasses.dataclass
 class VmConfig:
+    """Dataclass to hold parsed virtual-machine XML configuration values."""
+
     devices: Tuple[str] = dataclasses.field(default_factory=list)
     cpu: Tuple[int] = dataclasses.field(default_factory=list)
     hugepages1G: int = 0
     hugepages2M: int = 0
+
+    def __init__(self, xml_config: str):
+        root = xml.fromstring(xml_config)
+        self.cpu = (int(e.get("cpuset")) for e in root.findall(".//cputune/vcpupin"))
+        hugepages = root.find(".//memoryBacking/hugepages") is not None
+        memory = int(root.findtext(".//memory"))
+        mem_in_mb = memory // 1024
+        self.hugepages1G = mem_in_mb // 1024 if hugepages else 0
+        self.hugepages2M = mem_in_mb % self.hugepages1G if hugepages else 0
+        self.devices = (
+            param[6:]
+            for e in root.findall(
+                ".//qemu:commandline/qemu:arg",
+                {"qemu": "http://libvirt.org/schemas/domain/qemu/1.0"},
+            )
+            if "evdev=" in e.get("value")
+            for param in e.get("value").split(",")
+            if param.startswith("evdev=")
+        )
 
 
 class VfioKvmService(dbus.service.ServiceInterface):
@@ -51,12 +102,22 @@ class VfioKvmService(dbus.service.ServiceInterface):
     _BUS_NAME = "vfio.kvm"
     _OBJ_PATH = "/vfio/kvm"
 
-    async def __new__(cls, *args, **kwargs) -> "VfioKvmService":
+    async def __new__(cls, *args, **kwargs) -> dbus.service.ServiceInterface:
+        """A workaround for async __init__ functions."""
         instance = super().__new__(cls)
         await instance.__init__(*args, **kwargs)
         return instance
 
-    async def __init__(self, config=None, bus=None, path=None) -> None:
+    async def __init__(
+        self, config: str = None, bus: str = None, path: str = None
+    ) -> None:
+        """Creates a new DBUS service for managing virtual machines.
+
+        Args:
+            config: XXX
+            bus: XXX
+            path: XXX
+        """
         super().__init__(bus or self._BUS_NAME)
         self._vm_options = {}
         self._devices = {}
@@ -75,10 +136,12 @@ class VfioKvmService(dbus.service.ServiceInterface):
         with open(config) as fp:
             data = yaml.safe_load(fp) or {}
         if "host" in data:
-            self._vm_options[None] = self._parse_vm_options(data["host"])
+            self._vm_options[None] = VmOptions(
+                self._parse_hotkeys(data["host"].get("hotkey"))
+            )
         self._vm_options.update(
             {
-                key: self._parse_vm_options(value)
+                key: VmOptions(self._parse_hotkeys(value.get("hotkey")))
                 for key, value in data.get("vm", {}).items()
             }
         )
@@ -86,9 +149,6 @@ class VfioKvmService(dbus.service.ServiceInterface):
         self._manage_hugepages = data.get("manage_hugepages", False)
         self._configure_hotkey(data.get("hotkey"))
         self._configure_qemu_hotkey(data.get("qemu_hotkey"))
-
-    def _parse_vm_options(self, vm: Dict[str, Dict[str, List[str]]]) -> VmOptions:
-        return VmOptions(self._parse_hotkeys(vm.get("hotkey")))
 
     def _parse_hotkeys(self, hotkey: List[str]) -> Hotkey:
         try:
@@ -115,28 +175,6 @@ class VfioKvmService(dbus.service.ServiceInterface):
         logging.debug("Requesting bus name %s", _bus.unique_name)
         await _bus.request_name(bus)
         logging.debug("Bus name %s granted", _bus.unique_name)
-
-    def _parse_xml(self, xml_config: str) -> VmConfig:
-        root = xml.fromstring(xml_config)
-        cpu_pinnings = (
-            int(e.get("cpuset")) for e in root.findall(".//cputune/vcpupin")
-        )
-        hugepages = root.find(".//memoryBacking/hugepages") is not None
-        memory = int(root.findtext(".//memory"))
-        mem_in_mb = memory // 1024
-        gb_pages = mem_in_mb // 1024 if hugepages else 0
-        mb_pages = mem_in_mb % gb_pages if hugepages else 0
-        devices = (
-            param[6:]
-            for e in root.findall(
-                ".//qemu:commandline/qemu:arg",
-                {"qemu": "http://libvirt.org/schemas/domain/qemu/1.0"},
-            )
-            if "evdev=" in e.get("value")
-            for param in e.get("value").split(",")
-            if param.startswith("evdev=")
-        )
-        return VmConfig(devices, cpu_pinnings, gb_pages, mb_pages)
 
     @functools.cached_property
     def hotkey(self) -> Hotkey:
@@ -183,7 +221,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
     ) -> DbusTypes.Boolean:
         logging.info("VM %s starting up", vm_name)
         logging.debug("libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config)
-        config = self._parse_xml(xml_config)
+        config = VmConfig(xml_config)
         self._targets.append(vm_name)
         self._pin_cpus(config.cpu)
         self._allocate_hugepages(config.hugepages1G, config.hugepages2M)
@@ -240,7 +278,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
             return False
         logging.info("VM %s shutting down", vm_name)
         logging.debug("libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config)
-        config = self._parse_xml(xml_config)
+        config = VmConfig(xml_config)
         self._targets.remove(vm_name)
         if self._target == vm_name:
             self.target = None
@@ -435,6 +473,7 @@ class ReplicatedDevice:
 
 
 async def main() -> None:
+    """Configure logging and error handling and start the service."""
     logging.basicConfig(
         level=os.environ.get("LOGLEVEL", "INFO").upper(),
         format="[%(levelname)s] %(message)s",
@@ -442,6 +481,7 @@ async def main() -> None:
     manager = await VfioKvmService()
 
     def signal_handler() -> None:
+        """Stop the service and cleanup devices on receiving a signal."""
         manager.stop()
         asyncio.get_event_loop().stop()
 
