@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+from typing import (
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 import asyncio
 import dataclasses
 import functools
@@ -7,7 +15,6 @@ import logging
 import os
 import signal
 import stat
-import typing
 import xml.etree.ElementTree as xml
 
 import dbus_next as dbus
@@ -15,15 +22,23 @@ import evdev
 import yaml
 
 
+Hotkey = FrozenSet[int]
+
+
+class DbusTypes:
+    Boolean = "b"
+    String = "s"
+
+
 @dataclasses.dataclass
 class VmOptions:
-    hotkey: typing.FrozenSet[int] = dataclasses.field(default_factory=frozenset)
+    hotkey: Hotkey = dataclasses.field(default_factory=frozenset)
 
 
 @dataclasses.dataclass
 class VmConfig:
-    devices: typing.Tuple[str] = dataclasses.field(default_factory=list)
-    cpu: typing.Tuple[int] = dataclasses.field(default_factory=list)
+    devices: Tuple[str] = dataclasses.field(default_factory=list)
+    cpu: Tuple[int] = dataclasses.field(default_factory=list)
     hugepages1G: int = 0
     hugepages2M: int = 0
 
@@ -36,7 +51,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
     _BUS_NAME = "vfio.kvm"
     _OBJ_PATH = "/vfio/kvm"
 
-    async def __new__(cls, *args, **kwargs) -> dbus.service.ServiceInterface:
+    async def __new__(cls, *args, **kwargs) -> "VfioKvmService":
         instance = super().__new__(cls)
         await instance.__init__(*args, **kwargs)
         return instance
@@ -53,7 +68,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
         await self._configure_dbus(bus or self._BUS_NAME, path or self._OBJ_PATH)
         logging.info("Listening for libvirtd events")
 
-    def _parse_config(self, config):
+    def _parse_config(self, config: str) -> None:
         config = config or self._DEFAULT_CONFIG_PATH
         if not os.path.isfile(config):
             return
@@ -72,10 +87,10 @@ class VfioKvmService(dbus.service.ServiceInterface):
         self._configure_hotkey(data.get("hotkey"))
         self._configure_qemu_hotkey(data.get("qemu_hotkey"))
 
-    def _parse_vm_options(self, vm):
+    def _parse_vm_options(self, vm: Dict[str, Dict[str, List[str]]]) -> VmOptions:
         return VmOptions(self._parse_hotkeys(vm.get("hotkey")))
 
-    def _parse_hotkeys(self, hotkey):
+    def _parse_hotkeys(self, hotkey: List[str]) -> Hotkey:
         try:
             return frozenset(evdev.ecodes.ecodes[key] for key in hotkey)
         except:
@@ -86,13 +101,13 @@ class VfioKvmService(dbus.service.ServiceInterface):
             )
             return frozenset()
 
-    def _configure_hotkey(self, keys):
+    def _configure_hotkey(self, keys: List[str]) -> None:
         self._hotkey = self._parse_hotkeys(keys or self._DEFAULT_HOTKEY)
 
-    def _configure_qemu_hotkey(self, keys):
+    def _configure_qemu_hotkey(self, keys: List[str]) -> None:
         self._qemu_hotkey = self._parse_hotkeys(keys or self._DEFAULT_QEMU_HOTKEY)
 
-    async def _configure_dbus(self, bus, path):
+    async def _configure_dbus(self, bus: str, path: str) -> None:
         _bus = await dbus.aio.MessageBus(
             bus_type=dbus.constants.BusType.SYSTEM
         ).connect()
@@ -124,23 +139,23 @@ class VfioKvmService(dbus.service.ServiceInterface):
         return VmConfig(devices, cpu_pinnings, gb_pages, mb_pages)
 
     @functools.cached_property
-    def hotkey(self) -> frozenset:
+    def hotkey(self) -> Hotkey:
         return frozenset(self._hotkey)
 
     @functools.cached_property
-    def qemu_hotkey(self) -> frozenset:
+    def qemu_hotkey(self) -> Hotkey:
         return frozenset(self._qemu_hotkey)
 
-    def stop(self):
+    def stop(self) -> None:
         for device in self._devices.values():
             device.stop()
 
     @dbus.service.dbus_property(name="Target")
-    def target(self) -> "s":
+    def target(self) -> DbusTypes.String:
         return self._target
 
     @target.setter
-    def target(self, val: "s"):
+    def target(self, val: DbusTypes.String):
         display = val or "host device"
         if val == self._target:
             logging.debug("%s selected but %s is already active", display, display)
@@ -152,14 +167,20 @@ class VfioKvmService(dbus.service.ServiceInterface):
         self.emit_properties_changed({"Target": display})
 
     @dbus.service.method("Toggle")
-    def toggle(self) -> "s":
+    def toggle(self) -> DbusTypes.String:
         self.target = self._targets[
             (self._targets.index(self._target) + 1) % len(self._targets)
         ]
         return self.target
 
     @dbus.service.method("Prepare")
-    def prepare(self, vm_name: "s", sub_op: "s", extra_op: "s", xml_config: "s") -> "b":
+    def prepare(
+        self,
+        vm_name: DbusTypes.String,
+        sub_op: DbusTypes.String,
+        extra_op: DbusTypes.String,
+        xml_config: DbusTypes.String,
+    ) -> DbusTypes.Boolean:
         logging.info("VM %s starting up", vm_name)
         logging.debug("libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config)
         config = self._parse_xml(xml_config)
@@ -174,19 +195,25 @@ class VfioKvmService(dbus.service.ServiceInterface):
         )
         return True
 
-    def _pin_cpus(self, cpu):
+    def _pin_cpus(self, cpu: Tuple[int]) -> None:
         if not self._manage_cpu or not cpu:
             return
         logging.info("Pinning CPUs: %s", ", ".join(str(c) for c in sorted(cpu)))
 
-    def _allocate_hugepages(self, gb_pages, mb_pages):
+    def _allocate_hugepages(self, gb_pages: int, mb_pages: int) -> None:
         if not self._manage_hugepages or (not gb_pages and not mb_pages):
             return
         logging.info(
             "Allocating %d 1G hugepages and %d 2M hugepages", gb_pages, mb_pages
         )
 
-    def _create_devices(self, vm_name, devices, host_hotkey=None, guest_hotkey=None):
+    def _create_devices(
+        self,
+        vm_name: str,
+        devices: Tuple[str],
+        host_hotkey: Hotkey = None,
+        guest_hotkey: Hotkey = None,
+    ) -> None:
         for guest_source in devices:
             source = os.path.join(
                 os.sep,
@@ -201,7 +228,13 @@ class VfioKvmService(dbus.service.ServiceInterface):
             device.add(vm_name, guest_hotkey)
 
     @dbus.service.method("Release")
-    def release(self, vm_name: "s", sub_op: "s", extra_op: "s", xml_config: "s") -> "b":
+    def release(
+        self,
+        vm_name: DbusTypes.String,
+        sub_op: DbusTypes.String,
+        extra_op: DbusTypes.String,
+        xml_config: DbusTypes.String,
+    ) -> DbusTypes.Boolean:
         if vm_name not in self._targets:
             logging.debug("Attempted to release devices for unmanaged VM %s", vm_name)
             return False
@@ -216,19 +249,22 @@ class VfioKvmService(dbus.service.ServiceInterface):
         self._unpin_cpus(config.cpu)
         return True
 
-    def _unpin_cpus(self, cpu):
+    def _unpin_cpus(self, cpu: Tuple[int]) -> None:
         if not self._manage_cpu or not cpu:
             return
         logging.info("Unpinning CPUs: %s", ", ".join(str(c) for c in sorted(cpu)))
 
-    def _deallocate_hugepages(self, gb_pages, mb_pages):
+    def _deallocate_hugepages(self, gb_pages: int, mb_pages: int) -> None:
         if not self._manage_hugepages or (not gb_pages and not mb_pages):
             return
         logging.info(
             "Deallocating %d 1G hugepages and %d 2M hugepages", gb_pages, mb_pages
         )
 
-    def _destroy_devices(self, vm_name, devices):
+    def _destroy_devices(
+        self, vm_name: str, devices: Tuple[str], guest_hotkey: Hotkey = None
+    ) -> None:
+        is_last_vm = len(self._targets) == 1
         for guest_source in devices:
             source = os.path.join(
                 os.sep,
@@ -237,21 +273,19 @@ class VfioKvmService(dbus.service.ServiceInterface):
                 "by-id",
                 os.path.basename(guest_source)[len(vm_name) + 1 :],
             )
-            if source in self._devices:
-                device = self._devices.pop(source)
-                device.remove(vm_name)
-            else:
-                logging.warning(
-                    "Attempted to destroy non-existent device %s", guest_source
-                )
+            device = self._devices[source]
+            device.remove(vm_name, guest_hotkey)
+            if is_last_vm:
+                del self._devices[source]
+                del device
 
 
 class ReplicatedDevice:
     def __init__(
         self,
         source: str,
-        manager,
-        host_hotkey: typing.Optional[typing.FrozenSet[int]] = None,
+        manager: VfioKvmService,
+        host_hotkey: Optional[Hotkey] = None,
     ) -> None:
         if not os.path.exists(source) or not stat.S_ISCHR(os.stat(source).st_mode):
             raise IOError("No such device: %s", source)
@@ -266,7 +300,7 @@ class ReplicatedDevice:
         if host_hotkey:
             self._hotkeys[host_hotkey] = None
 
-    def _get_device_path(self, target):
+    def _get_device_path(self, target: str) -> str:
         return os.path.join(
             os.sep,
             "dev",
@@ -275,7 +309,9 @@ class ReplicatedDevice:
             f"{target}-{self._name}",
         )
 
-    def _create_device(self, target, *, key=False):
+    def _create_device(
+        self, target: str, *, key: Union[bool, None, str] = False
+    ) -> None:
         path = self._get_device_path(target)
         logging.info(f"Creating {target} device %s", path)
         device = evdev.UInput.from_device(self._source)
@@ -285,7 +321,9 @@ class ReplicatedDevice:
             os.unlink(path)
         os.symlink(device.device, path)
 
-    def _destroy_device(self, target, *, key=False):
+    def _destroy_device(
+        self, target: str, *, key: Union[bool, None, str] = False
+    ) -> None:
         index = key if key is not False else target
         if index not in self._targets:
             return
@@ -296,7 +334,7 @@ class ReplicatedDevice:
             os.unlink(path)
         self._targets.pop(index).close()
 
-    async def _grab_source(self):
+    async def _grab_source(self) -> None:
         while 1:
             try:
                 self._source.grab()
@@ -315,7 +353,7 @@ class ReplicatedDevice:
         is_toggle = False
         hotkey_triggered = None
 
-        async def handle_toggle(active_keys):
+        async def handle_toggle(active_keys: Hotkey) -> None:
             nonlocal is_toggle
             if event.value == 1 and active_keys == self._manager.hotkey:
                 is_toggle = True
@@ -325,7 +363,7 @@ class ReplicatedDevice:
                 is_toggle = False
                 self._manager.toggle()
 
-        async def handle_hotkeys(active_keys):
+        async def handle_hotkeys(active_keys: Hotkey) -> None:
             nonlocal hotkey_triggered
             if event.value == 1 and active_keys in self._hotkeys:
                 hotkey_triggered = active_keys
@@ -345,7 +383,7 @@ class ReplicatedDevice:
         except asyncio.CancelledError:
             return
 
-    def grab(self):
+    def grab(self) -> None:
         if not self._manager.target:
             return
         try:
@@ -382,15 +420,16 @@ class ReplicatedDevice:
         except IOError:
             pass
 
-    def add(self, vm_name: str, hotkey=None) -> None:
+    def add(self, vm_name: str, hotkey: Optional[Hotkey] = None) -> None:
         if hotkey:
             self._hotkeys[hotkey] = vm_name
             logging.debug("Adding hotkey %s to VM %s", hotkey, vm_name)
         self.start()
         self._create_device(vm_name)
 
-    def remove(self, vm_name: str) -> None:
+    def remove(self, vm_name: str, hotkey: Optional[Hotkey] = None) -> None:
         self._destroy_device(vm_name)
+        self._hotkeys.pop(hotkey, None)
         if len(self._targets) == 1:
             self.stop()
 
