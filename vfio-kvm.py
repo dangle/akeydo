@@ -5,29 +5,33 @@ deletion, replication, CPU pinning, and hugepages allocation.
 
 Classes:
     DbusTypes: An enumeration of types used by dbus_next.
+    ReplicatedDevice: Manages a real system device and creates virtual devices
+        that can receive input only when a specific virtual machine (or the
+        host) has focus.
     VmOptions: A dataclass containing options for virtual machines configured at
         launch and not in the XML configuration of the virtual machine.
     VmConfig: A class containing the relevant parsed sections of a virtual
         machine's XML configuration during the virtual machine's start.
     VfioKvmService: The service that manages hardware alterations and
         replications as well as signaling when a new virtual machine has focus.
-    ReplicatedDevice: Manages a real system device and creates virtual devices
-        that can receive input only when a specific virtual machine (or the
-        host) has focus.
 
 Type Aliases:
     Hotkey: A structure describing a sequence of Linux-defined values
         representing key presses used to trigger an action.
 
 Functions:
+    handle_exception: Stops the event loop if a task has an exception.
     main: Called when this script is run as an executable. It creates the
         services and handles exceptions in the event loop.
+
+Environment Variables:
+    LOGLEVEL: The level of logs to output.
 """
 
 
 from typing import (
     FrozenSet,
-    List,
+    Iterable,
     Optional,
     Set,
     Tuple,
@@ -35,9 +39,9 @@ from typing import (
 )
 import asyncio
 import dataclasses
-import functools
 import logging
 import os
+import pathlib
 import signal
 import stat
 import xml.etree.ElementTree as xml
@@ -64,39 +68,55 @@ class VmOptions:
     hotkey: Hotkey = dataclasses.field(default_factory=frozenset)
 
 
+_EMPTY_VM_OPTIONS = VmOptions()
+
+
 class VmConfig:
     """A representation of virtual-machine XML configuration values."""
 
     def __init__(self, xml_config: str):
-        """XXX"""
+        """Parse libvirt XML configuration.
+
+        Parses an XML configuration for a virtual machine passed to the service
+        via a libvirt hook. The relevant values are stored on this object for
+        later reference.
+
+        Args:
+            xml_config: The XML configuration for a virtual machine that was
+                passed to the service through a VM hook.
+        """
         root = xml.fromstring(xml_config)
+        name = root.findtext(".//name")
         hugepages = root.find(".//memoryBacking/hugepages") is not None
         memory = int(root.findtext(".//memory"))
         mem_in_mb = memory // 1024
-        self.hugepages1G: int = mem_in_mb // 1024 if hugepages else 0
-        self.hugepages2M: int = mem_in_mb % self.hugepages1G if hugepages else 0
-        self.cpu: List[int] = (
+        mem_in_gb = mem_in_mb // 1024
+        extra_memory = mem_in_mb % 2
+        self.hugepages1G: int = mem_in_gb if hugepages else 0
+        self.hugepages2M: int = mem_in_mb % mem_in_gb + extra_memory if hugepages else 0
+        self.cpu: Tuple[int] = tuple(
             int(e.get("cpuset")) for e in root.findall(".//cputune/vcpupin")
         )
         self.devices: Set[str] = {
-            e.get("evdev")
+            dev
             for e in root.findall(".//devices/input[@type='passthrough']/source")
+            if (dev := e.get("evdev")).startswith(f"/dev/input/by-id/{name}-")
         } | {
             param[6:]
             for e in root.findall(
                 ".//qemu:commandline/qemu:arg",
                 {"qemu": "http://libvirt.org/schemas/domain/qemu/1.0"},
             )
-            if "evdev=" in e.get("value")
-            for param in e.get("value").split(",")
-            if param.startswith("evdev=")
+            if "evdev=" in (val := e.get("value"))
+            for param in val.split(",")
+            if param.startswith(f"evdev=/dev/input/by-id/{name}-")
         }
 
 
 class VfioKvmService(dbus.service.ServiceInterface):
     """XXX"""
 
-    _DEFAULT_CONFIG_PATH = "/etc/vfio-kvm.yaml"
+    _DEFAULT_CONFIG_PATH = pathlib.Path("/etc/vfio-kvm.yaml")
     _DEFAULT_QEMU_HOTKEY = ("KEY_LEFTCTRL", "KEY_RIGHTCTRL")
     _DEFAULT_HOTKEY = _DEFAULT_QEMU_HOTKEY
 
@@ -110,37 +130,43 @@ class VfioKvmService(dbus.service.ServiceInterface):
         return instance
 
     async def __init__(
-        self, config: str = None, bus: str = None, path: str = None
+        self, config: os.PathLike = None, bus: str = None, path: str = None
     ) -> None:
-        """Creates a new DBUS service for managing virtual machines.
+        """Create a new D-BUS service for managing virtual machines.
+
+        Requesting a bus name that the running user does not have access to will
+        cause the program to hang indefinitely because dbus_next does not yield
+        control or timeout.
 
         Args:
-            config: XXX
-            bus: XXX
-            path: XXX
+            config: A path to a configuration file containing hotkeys and other
+                configuration options.
+            bus: The bus name to request from D-BUS.
+            path: The D-BUS path to export on the requested bus for this service.
         """
         super().__init__(bus or self._BUS_NAME)
         self._released = False
         self._vm_options = {}
         self._devices = {}
-        self._targets = [None]
+        self._targets = [None]  # None represents the host as a target
         self._target = None
         self._manage_cpu = False
         self._manage_hugepages = False
-        self._parse_config(config=config or self._DEFAULT_CONFIG_PATH)
-        await self._configure_dbus(bus or self._BUS_NAME, path or self._OBJ_PATH)
+        self._configure(config)
+        await self._init_dbus(bus or self._BUS_NAME, path or self._OBJ_PATH)
         logging.info("Listening for libvirtd events")
 
-    def _parse_config(self, config: str) -> None:
-        """XXX
+    def _configure(self, config: os.PathLike = None) -> None:
+        """Parse a YAML configuration file to configure this service.
 
         Args:
-            config: XXX
+            config: A Path to a configuration file that contains settings for the
+                service including hotkeys used for mapping keys to virtual machines.
         """
         config = config or self._DEFAULT_CONFIG_PATH
-        if not os.path.isfile(config):
+        if not config.is_file():
             return
-        with open(config) as fp:
+        with open(config.resolve()) as fp:
             data = yaml.safe_load(fp) or {}
         if "host" in data:
             self._vm_options[None] = VmOptions(
@@ -160,30 +186,37 @@ class VfioKvmService(dbus.service.ServiceInterface):
             data.get("qemu_hotkey", self._DEFAULT_QEMU_HOTKEY)
         )
 
-    def _parse_hotkeys(self, hotkey: List[str]) -> Hotkey:
-        """XXX
+    def _parse_hotkeys(self, hotkey: Iterable[str]) -> Optional[Hotkey]:
+        """Convert a list of strings representing keys to a set of int codes.
 
         Args:
-            hotkey: XXX
+            hotkey: An iterable containing strings of the format KEY_XXX defined
+                by the Linux kernel that can be converted to the integers
+                returned by keyboard presses.
 
-        Returns: XXX
+        Returns: A frozenset containing the integers represented by the strings
+            in the initial iterable. If any of the strings is unable to be
+            converted into an integer a warning will be logged and None will be
+            returned instead of a frozenset.
         """
         try:
             return frozenset(evdev.ecodes.ecodes[key] for key in hotkey)
-        except:
+        except KeyError:
             logging.warning(
                 "Unable to match all keys in hotkey %s to integers. "
                 "Hotkey will be unavailable.",
                 hotkey,
             )
-            return frozenset()
+            return None
 
-    async def _configure_dbus(self, bus: str, path: str) -> None:
-        """XXX
+    async def _init_dbus(self, bus: str, path: str) -> None:
+        """Initialize D-BUS with the given bus name and path.
 
         Args:
-            bus: XXX
-            path: XXX
+            bus: The D-BUS bus name to request. This should be of the format:
+                org.domain.subdomain
+            path: The D-BUS path to export on the requested bus. It should be of
+                the format: /org/domain/subdomain
         """
         _bus = await dbus.aio.MessageBus(
             bus_type=dbus.constants.BusType.SYSTEM
@@ -193,38 +226,64 @@ class VfioKvmService(dbus.service.ServiceInterface):
         await asyncio.wait_for(_bus.request_name(bus), timeout=30)
         logging.debug("Bus name %s granted", _bus.unique_name)
 
-    @functools.cached_property
+    @property
     def hotkey(self) -> Hotkey:
-        return frozenset(self._hotkey)
+        """Return the hotkey for toggling focus between virtual machines."""
+        return self._hotkey
 
-    @functools.cached_property
+    @property
     def qemu_hotkey(self) -> Hotkey:
-        return frozenset(self._qemu_hotkey)
+        """Return the hotkey used by QEMU to toggle between a guest and host."""
+        return self._qemu_hotkey
 
-    @functools.cached_property
+    @property
     def release_hotkey(self) -> Hotkey:
-        return frozenset(self._release_hotkey)
+        """Return the hotkey used to release devices to the host without
+        changing the target."""
+        return self._release_hotkey
 
     @property
     def released(self):
+        """Return the device released state."""
         return self._released
 
     @released.setter
     def released(self, value: bool) -> bool:
+        """Set the device released state to the given value.
+
+        Returns the new device released state.
+        """
         logging.debug(f"Released state set to {value}")
         self._released = value
         return self._released
 
     def stop(self) -> None:
+        """Stop all devices running on the service."""
         for device in self._devices.values():
             device.stop()
 
     @dbus.service.dbus_property(name="Target")
     def target(self) -> DbusTypes.String:
-        return self._target
+        """Return the current target.
+
+        This is a D-BUS property that can be queried for the currently active
+        target as a string.
+        """
+        return self._target if not self._released else None
 
     @target.setter
     def target(self, val: DbusTypes.String):
+        """Set the target to a specific virtual machine.
+
+        This is a D-BUS property that can be used to change the currently active
+        target. When the target is changed, any released devices are grabbed and
+        a property change is emitted via D-BUS.
+
+        If the target is set to the already active target, no change will be
+        emitted and released devices will remain released.
+
+        If the python value None is given the host device will be selected.
+        """
         display = val or "host device"
         if val == self._target:
             logging.debug("%s selected but %s is already active", display, display)
@@ -238,6 +297,11 @@ class VfioKvmService(dbus.service.ServiceInterface):
 
     @dbus.service.method("Toggle")
     def toggle(self) -> DbusTypes.String:
+        """Cycle the active target to the next virtual machine.
+
+        This is a D-BUS method that can be called to cycle the currently active
+        virtual machine.
+        """
         self.target = self._targets[
             (self._targets.index(self._target) + 1) % len(self._targets)
         ]
@@ -251,26 +315,81 @@ class VfioKvmService(dbus.service.ServiceInterface):
         extra_op: DbusTypes.String,
         xml_config: DbusTypes.String,
     ) -> DbusTypes.Boolean:
-        logging.info("VM %s preparing to start", vm_name)
-        logging.debug("libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config)
-        config = VmConfig(xml_config)
-        self._targets.append(vm_name)
-        self._pin_cpus(config.cpu)
-        self._allocate_hugepages(config.hugepages1G, config.hugepages2M)
-        self._create_devices(
-            vm_name,
-            config.devices,
-            self._vm_options.get(None, VmOptions()).hotkey,
-            self._vm_options.get(vm_name, VmOptions()).hotkey,
-        )
-        return True
+        """Create devices to prepare for a new virtual machine.
+
+        The service extracts information about requested passthrough devices,
+        hugepages memory requests, and CPU tuning.
+
+        The service creates new devices by removing "{vm_name}-" from the device
+        and creating replicas of the base device to be used by the host and
+        guest.
+
+        If the "manage_cpu" option is enabled, it will set cpusets to restrict
+        the kernel from adding processes to the pinned CPUs.
+
+        If the "manage_hugepages" option is enabled and the virtual machine XML
+        specifies "<hugepages/>" it will try to free up sufficient memory and
+        dynamically allocate enough hugepages for the virtual machine.
+
+        Args:
+            vm_name: The name of the new virtual machine.
+            sub_op: The libvirt sub-operation. Always "begin".
+            extra_op: The libvirt extra-operation. Always "-".
+            xml_config: The libvirt XML definition of the new virtual machine
+                that is about to be started.
+        """
+        try:
+            logging.info("VM %s preparing to start", vm_name)
+            logging.debug(
+                "libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config
+            )
+            config = VmConfig(xml_config)
+            self._targets.append(vm_name)
+            self._pin_cpus(config.cpu)
+            self._allocate_hugepages(config.hugepages1G, config.hugepages2M)
+            self._create_devices(
+                vm_name,
+                config.devices,
+                self._vm_options.get(None, _EMPTY_VM_OPTIONS).hotkey,
+                self._vm_options.get(vm_name, _EMPTY_VM_OPTIONS).hotkey,
+            )
+            return True
+        except Exception as e:
+            logging.exception(
+                "An exception occurred while preparing a virtual machine."
+            )
+            return False
 
     def _pin_cpus(self, cpu: Tuple[int]) -> None:
+        """Restrict kernel processes to pinned CPUs.
+
+        If the "manage_cpu" option is enabled, it will set cpusets to restrict
+        the kernel from adding processes to the pinned CPUs.
+
+        Arg:
+            cpu: A tuple of integers of CPUs to restrict. These should match up
+                to pinned CPUs from the virtual machine XML configuration.
+        """
         if not self._manage_cpu or not cpu:
             return
         logging.info("Pinning CPUs: %s", ", ".join(str(c) for c in sorted(cpu)))
 
     def _allocate_hugepages(self, gb_pages: int, mb_pages: int) -> None:
+        """Allocate memory for hugepages.
+
+        If the "manage_hugepages" option is enabled and the virtual machine XML
+        specifies "<hugepages/>" it will try to free up sufficient memory and
+        dynamically allocate enough hugepages for the virtual machine.
+
+        Args:
+            gb_pages: The number of 1GB hugepages to allocate. This should be
+                calculated by dividing the memory requested for the virtual
+                machine into 1GB chunks.
+            mb_pages: The number of 2MB hugepages to allocate. This should be
+                calculated by taking the remainder of the memory requested for
+                the virtual machine after dividing it into 1GB chunks and then
+                dividing that into 2MB chunks.
+        """
         if not self._manage_hugepages or (not gb_pages and not mb_pages):
             return
         logging.info(
@@ -284,6 +403,34 @@ class VfioKvmService(dbus.service.ServiceInterface):
         host_hotkey: Hotkey = None,
         guest_hotkey: Hotkey = None,
     ) -> None:
+        """Create devices requested in the virtual machine's XML configuration.
+
+        While parsing the XML configuration for the virtual machine all input
+        devices starting with "/dev/input/by-id/{vm_name}-" are extracted from
+        passthrough input tags and qemu:arg tags and passed to this function.
+
+        For each device passed to this function, vm_name is removed from the
+        device to get the true source device. For each source device, a
+        ReplicatedDevice is created to divert input events from either the host
+        or running guests.
+
+        If a ReplicatedDevice already exists for the source device, the virtual
+        machine will be added as an additional target for device.
+
+        Args:
+            vm_name: The name of the new virtual machine. This is used to
+                determine the true source device from the requested guest source
+                device given.
+            devices: A tuple of strings representing devices that the virtual
+                machine would like to have created. They are of the form:
+                    /dev/input/by-id/{vm_name}-{device-ID}
+                The vm_name is removed to give a source device of the form:
+                    /dev/input/by-id/{device-ID}
+            host_hotkey: A hotkey that the device should monitor to switch the
+                target back to the host device.
+            guest_hotkey: A hotkey that the device should monitor to switch the
+                target to this specific virtual machine.
+        """
         for guest_source in devices:
             source = os.path.join(
                 os.sep,
@@ -305,19 +452,29 @@ class VfioKvmService(dbus.service.ServiceInterface):
         extra_op: DbusTypes.String,
         xml_config: DbusTypes.String,
     ) -> DbusTypes.Boolean:
-        if vm_name not in self._targets:
-            logging.debug("Attempted to release devices for unmanaged VM %s", vm_name)
+        try:
+            if vm_name not in self._targets:
+                logging.debug(
+                    "Attempted to release devices for unmanaged VM %s", vm_name
+                )
+                return False
+            logging.info("VM %s shutting down", vm_name)
+            logging.debug(
+                "libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config
+            )
+            config = VmConfig(xml_config)
+            self._targets.remove(vm_name)
+            if self._target == vm_name:
+                self.target = None
+            self._destroy_devices(vm_name, config.devices)
+            self._deallocate_hugepages(config.hugepages1G, config.hugepages2M)
+            self._unpin_cpus(config.cpu)
+            return True
+        except Exception as e:
+            logging.exception(
+                "An exception occurred while preparing a virtual machine."
+            )
             return False
-        logging.info("VM %s shutting down", vm_name)
-        logging.debug("libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config)
-        config = VmConfig(xml_config)
-        self._targets.remove(vm_name)
-        if self._target == vm_name:
-            self.target = None
-        self._destroy_devices(vm_name, config.devices)
-        self._deallocate_hugepages(config.hugepages1G, config.hugepages2M)
-        self._unpin_cpus(config.cpu)
-        return True
 
     def _unpin_cpus(self, cpu: Tuple[int]) -> None:
         if not self._manage_cpu or not cpu:
@@ -419,9 +576,7 @@ class ReplicatedDevice:
 
     @property
     def _target(self) -> evdev.device.InputDevice:
-        return self._targets.get(
-            None if self._manager.released else self._manager.target
-        )
+        return self._targets.get(self._manager.target)
 
     async def _replicate(self) -> None:
         is_release = False
@@ -523,6 +678,14 @@ class ReplicatedDevice:
 
 
 def handle_exception(task: asyncio.Task) -> None:
+    """Handle any exceptions that occur in tasks.
+
+    Log all errors and stop the event loop when any exception of than
+    asyncio.CancelledError is raised.
+
+    Args:
+        task: The task that raised the exception.
+    """
     try:
         task.result()
     except asyncio.CancelledError:
