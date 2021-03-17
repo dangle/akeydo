@@ -41,6 +41,7 @@ from typing import (
 )
 import asyncio
 import dataclasses
+import functools
 import logging
 import os
 import pathlib
@@ -459,8 +460,8 @@ class VfioKvmService(dbus.service.ServiceInterface):
             self._create_devices(
                 vm_name,
                 config.devices,
-                self._vm_options.get(None, _EMPTY_VM_OPTIONS).hotkey,
-                self._vm_options.get(vm_name, _EMPTY_VM_OPTIONS).hotkey,
+                self._settings.vm_options.get(None, _EMPTY_VM_OPTIONS).hotkey,
+                self._settings.vm_options.get(vm_name, _EMPTY_VM_OPTIONS).hotkey,
             )
             return True
         except Exception:
@@ -509,8 +510,8 @@ class VfioKvmService(dbus.service.ServiceInterface):
         self,
         vm_name: str,
         devices: Set[str],
-        host_hotkey: Hotkey = None,
-        guest_hotkey: Hotkey = None,
+        host_hotkey: Optional[Hotkey],
+        guest_hotkey: Optional[Hotkey],
     ) -> None:
         """Create devices requested in the virtual machine's XML configuration.
 
@@ -596,7 +597,11 @@ class VfioKvmService(dbus.service.ServiceInterface):
             self._targets.remove(vm_name)
             if self._target == vm_name:
                 self.target = None
-            self._destroy_devices(vm_name, config.devices)
+            self._destroy_devices(
+                vm_name,
+                config.devices,
+                self._settings.vm_options.get(vm_name, _EMPTY_VM_OPTIONS).hotkey,
+            )
             self._deallocate_hugepages(config.hugepages_1g, config.hugepages_2m)
             self._unpin_cpus(config.cpu)
             return True
@@ -644,7 +649,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
         )
 
     def _destroy_devices(
-        self, vm_name: str, devices: Set[str], guest_hotkey: Hotkey = None
+        self, vm_name: str, devices: Set[str], guest_hotkey: Optional[Hotkey]
     ) -> None:
         """Destroy devices created for use with the virtual machine.
 
@@ -689,7 +694,13 @@ class VfioKvmService(dbus.service.ServiceInterface):
 
 
 class ReplicatedDevice:
-    """XXX"""
+    """A device manager for redirecting device events.
+
+    This takes a real source device and creates virtual devices for every
+    virtual machine that requests the source device. Events from the source
+    device are captured, monitored for configured hotkeys, and events are
+    forwarded to the currently active target.
+    """
 
     def __init__(
         self,
@@ -697,9 +708,18 @@ class ReplicatedDevice:
         manager: VfioKvmService,
         host_hotkey: Optional[Hotkey] = None,
     ) -> None:
+        """Initialize a new device to be monitored and replicated.
+
+        Args:
+            source: The path to the source device that all virtual devices will
+                replicate.
+            manager: The service managing all of the ReplicatedDevices. This is
+                used in order to read the current target.
+            host_hotkey: An optional hotkey that will cause an immediate switch
+                to the host device.
+        """
         if not os.path.exists(source) or not stat.S_ISCHR(os.stat(source).st_mode):
             raise IOError(f"No such device: {source}")
-        self._name = os.path.basename(source)
         self._source_path = source
         self._source: Optional[evdev.InputDevice] = None
         self._manager = manager
@@ -710,7 +730,21 @@ class ReplicatedDevice:
         if host_hotkey:
             self._hotkeys[host_hotkey] = None
 
+    @functools.cached_property
+    def _name(self):
+        """Return the base name of the device."""
+        return os.path.basename(self._source_path)
+
     def _get_device_path(self, target: str) -> str:
+        """Get the device path of the virtual device for the target.
+
+        Args:
+            target: The name of the target virtual machine or "host" for the the
+                device created for the host.
+
+        Returns: The path to the virtual device on the file system.
+
+        """
         return os.path.join(
             os.sep,
             "dev",
@@ -722,6 +756,19 @@ class ReplicatedDevice:
     def _create_device(
         self, target: str, *, key: Union[bool, None, str] = False
     ) -> None:
+        """Create a new UInput device from the source device.
+
+        Args:
+            target: The name of the target to be used as a prefix for the newly
+                created device. For virtual machines this should be the name of
+                the virtual machine. For the host device it should be "host".
+            key: The key used to store the device in the target map. For virtual
+                machines, this should be the name of the virtual machine. For
+                the host device it should be None.
+                The default value of the key is False. If the key is False, it
+                will use the name of the virtual machine. This acts as a
+                sentinel so that None can be used as a key for the host.
+        """
         path = self._get_device_path(target)
         logging.info("Creating %s device %s", target, path)
         device = evdev.UInput.from_device(self._source)
@@ -734,6 +781,19 @@ class ReplicatedDevice:
     def _destroy_device(
         self, target: str, *, key: Union[bool, None, str] = False
     ) -> None:
+        """Destroy the device created for the target.
+
+        Args:
+            target: The name of the target used as a prefix for the newly
+                device. For virtual machines this should be the name of the
+                virtual machine. For the host device it should be "host".
+            key: The key used to store the device in the target map. For virtual
+                machines, this should be the name of the virtual machine. For
+                the host device it should be None.
+                The default value of the key is False. If the key is False, it
+                will use the name of the virtual machine. This acts as a
+                sentinel so that None can be used as a key for the host.
+        """
         index = key if key is not False else target
         if index not in self._targets:
             return
@@ -745,6 +805,11 @@ class ReplicatedDevice:
         self._targets.pop(index).close()
 
     async def _grab_source(self) -> None:
+        """Grab the source device if it is ungrabbed.
+
+        This task grabs the source device if it is ungrabbed and attempts to
+        re-grab it every five seconds in case the device was disconnected.
+        """
         while 1:
             try:
                 if self._source:
@@ -762,13 +827,27 @@ class ReplicatedDevice:
         return self._targets.get(self._manager.target)
 
     async def _replicate(self) -> None:
+        """Listen to the source for hotkeys and pass events to the target.
+
+        This listens for three types of events:
+
+        1. Release events. If the release hotkey is detected, the "released"
+           value for the manager is toggled.
+        2. Toggle events. If the toggle hotkey is detected, the "toggle" method
+           on the manager is called.
+        3. VM hotkey events. If a key combination in the hotkeys map is
+           detected then the target on the manager will be set to the value
+           associated with the hotkey.
+
+        All other events are forwarded to the current target if the device has
+        a mapping for the current target.
+        """
         if not self._source:
             return
 
         source = self._source
+
         is_release = False
-        is_toggle = False
-        hotkey_triggered: Optional[Hotkey] = None
 
         async def handle_release(event: evdev.InputEvent, active_keys: Hotkey) -> None:
             nonlocal is_release
@@ -780,6 +859,8 @@ class ReplicatedDevice:
                 is_release = False
                 self._manager.released = not self._manager.released
 
+        is_toggle = False
+
         async def handle_toggle(event: evdev.InputEvent, active_keys: Hotkey) -> None:
             nonlocal is_toggle
             if event.value == 1 and active_keys == self._manager.hotkey:
@@ -789,6 +870,8 @@ class ReplicatedDevice:
                 await asyncio.sleep(0.1)
                 is_toggle = False
                 self._manager.toggle()
+
+        hotkey_triggered: Optional[Hotkey] = None
 
         async def handle_hotkeys(event: evdev.InputEvent, active_keys: Hotkey) -> None:
             nonlocal hotkey_triggered
@@ -810,6 +893,7 @@ class ReplicatedDevice:
                     await handle_hotkeys(event, active_keys)
 
     def grab(self) -> None:
+        """Send the QEMU hotkey to a VM to force it to grab devices."""
         if not self._manager.target or not self._target:
             return
         try:
@@ -824,6 +908,18 @@ class ReplicatedDevice:
         self._target.syn()
 
     def start(self) -> None:
+        """Create source devices and tasks for grabbing and replicating.
+
+        If the source is not currently being monitored by this device it will
+        grab the device and create a "host" device to forward events to by
+        default.
+
+        If no grab task is currently running it will create a new grab task for
+        device.
+
+        If no replicate task is currently running it will create a new replicate
+        task for the device.
+        """
         if not self._source:
             self._source = evdev.InputDevice(self._source_path)
             self._create_device("host", key=None)
@@ -839,22 +935,36 @@ class ReplicatedDevice:
             self._replicate_task.add_done_callback(handle_exception)
 
     def stop(self) -> None:
+        """Stop replicating and toggling this device to virtual machines.
+
+        Cancels the replicate and grab tasks and destroys all devices created
+        for virtual machines and ungrabs and closes the source device.
+        """
         if self._replicate_task:
             self._replicate_task.cancel()
         if self._grab_task:
             self._grab_task.cancel()
         for target in frozenset(self._targets.keys()):
             self._destroy_device(cast(str, target) if target else "host", key=target)
-        try:
-            if self._source:
+        if self._source:
+            try:
                 self._source.ungrab()
                 logging.info("Ungrabbed device %s", self._source.path)
-                self._source.close()
-                self._source = None
-        except IOError:
-            pass
+            except IOError:
+                pass
+            self._source.close()
+            self._source = None
 
     def add(self, vm_name: str, hotkey: Optional[Hotkey] = None) -> None:
+        """Add a new virtual device for the virtual machine.
+
+        Args:
+            vm_name: The name of the new virtual machine to be monitored. This
+                is used as a prefix for all newly created virtual devices.
+            hotkey: An optional hotkey combination that will be monitored and,
+                if detected, will cause a switch directly to this virtual
+                machine.
+        """
         if hotkey:
             self._hotkeys[hotkey] = vm_name
             logging.debug("Adding hotkey %s to VM %s", hotkey, vm_name)
@@ -862,6 +972,15 @@ class ReplicatedDevice:
         self._create_device(vm_name)
 
     def remove(self, vm_name: str, hotkey: Optional[Hotkey] = None) -> None:
+        """Remove the virtual device created for the virtual machine.
+
+        Args:
+            vm_name: The name of the virtual machine that is no longer to be
+                monitored. The virtual device created with this name as a prefix
+                will be destroyed.
+            hotkey: An optional hotkey combination. If given, any matching
+                hotkey will be removed from the list of monitored hotkeys.
+        """
         self._destroy_device(vm_name)
         if hotkey:
             self._hotkeys.pop(hotkey, None)
