@@ -51,7 +51,7 @@ Hotkey = FrozenSet[int]
 
 
 class DbusTypes:
-    """Enumeration to represent the strings used by dbus_next."""
+    """An enumeration to represent the strings used by dbus_next."""
 
     Boolean = "b"
     String = "s"
@@ -59,7 +59,7 @@ class DbusTypes:
 
 @dataclasses.dataclass
 class VmOptions:
-    """Dataclass to hold data virtual machine-specific options."""
+    """A dataclass to hold data virtual machine-specific options."""
 
     hotkey: Hotkey = dataclasses.field(default_factory=frozenset)
 
@@ -458,16 +458,13 @@ class ReplicatedDevice:
                 self._manager.target = self._hotkeys[hotkey_triggered]
                 hotkey_triggered = None
 
-        try:
-            async for event in self._source.async_read_loop():
-                self._target.write_event(event)
-                if event.type == evdev.ecodes.EV_KEY:
-                    active_keys = frozenset(self._source.active_keys())
-                    await handle_release(active_keys)
-                    await handle_toggle(active_keys)
-                    await handle_hotkeys(active_keys)
-        except asyncio.CancelledError:
-            return
+        async for event in self._source.async_read_loop():
+            self._target.write_event(event)
+            if event.type == evdev.ecodes.EV_KEY:
+                active_keys = frozenset(self._source.active_keys())
+                await handle_release(active_keys)
+                await handle_toggle(active_keys)
+                await handle_hotkeys(active_keys)
 
     def grab(self) -> None:
         if not self._manager.target:
@@ -488,9 +485,15 @@ class ReplicatedDevice:
             self._source = evdev.InputDevice(self._source_path)
             self._create_device("host", key=None)
         if not self._grab_task:
-            self._grab_task = asyncio.create_task(self._grab_source())
+            self._grab_task = asyncio.create_task(
+                self._grab_source(), name=f"Grab: {self._name}"
+            )
+            self._grab_task.add_done_callback(handle_exception)
         if not self._replicate_task:
-            self._replicate_task = asyncio.create_task(self._replicate())
+            self._replicate_task = asyncio.create_task(
+                self._replicate(), name=f"Replicate: {self._name}"
+            )
+            self._replicate_task.add_done_callback(handle_exception)
 
     def stop(self) -> None:
         self._replicate_task.cancel()
@@ -519,6 +522,16 @@ class ReplicatedDevice:
             self.stop()
 
 
+def handle_exception(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except:
+        logging.exception("Exception raised by task %s", task.get_name())
+        asyncio.get_event_loop().stop()
+
+
 async def main() -> None:
     """Configure logging and error handling and start the service."""
     logging.basicConfig(
@@ -532,14 +545,13 @@ async def main() -> None:
         manager.stop()
         asyncio.get_event_loop().stop()
 
+    loop = asyncio.get_event_loop()
+
     for s in (signal.SIGINT, signal.SIGQUIT, signal.SIGTERM):
-        asyncio.get_event_loop().add_signal_handler(s, signal_handler)
+        loop.add_signal_handler(s, signal_handler)
 
 
 if __name__ == "__main__":
-    task = asyncio.get_event_loop().create_task(main())
-    try:
-        asyncio.get_event_loop().run_forever()
-    except SystemExit:
-        task.exception()
-        raise
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())
+    loop.run_forever()
