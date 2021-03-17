@@ -96,7 +96,9 @@ class VmConfig:
         mem_in_gb = mem_in_mb // 1024
         extra_memory = mem_in_mb % 2
         self.hugepages1G: int = mem_in_gb if hugepages else 0
-        self.hugepages2M: int = mem_in_mb % mem_in_gb + extra_memory if hugepages else 0
+        self.hugepages2M: int = (
+            mem_in_mb % mem_in_gb / 2 + extra_memory if hugepages else 0
+        )
         self.cpu: Tuple[int, ...] = tuple(
             int(e.get("cpuset", "0")) for e in root.findall(".//cputune/vcpupin")
         )
@@ -117,14 +119,98 @@ class VmConfig:
 
 
 class VfioKvmService(dbus.service.ServiceInterface):
-    """XXX"""
+    """A D-BUS service that creates and manages virtual devices for libvirt
+    virtual machines.
+
+    D-Bus Methods:
+
+        Toggle (string):
+            This method cycles the currently active target to the next available
+            machine.
+
+            Returns: The newly activated target.
+
+        Prepare (boolean):
+            Accepts the information for a libvirt QEMU hook including the
+            virtual machine name, the sub-operation, extra-operation and the XML
+            configuration for the virtual machine. It then pins CPUs, allocates
+            memory, and creates devices to use to send input to the virtual
+            machine.
+
+            Returns:
+                A boolean value to indicate if it was successful or not. On a
+                failure, the virtual machine will not be started.
+
+        Release (boolean):
+            Accepts the information for a libvirt QEMU hook including the
+            virtual machine name, the sub-operation, extra-operation and the XML
+            configuration for the virtual machine. If any resources were
+            allocated for the virtual machine they will be freed up. Any devices
+            created will be destroyed.
+
+            Returns:
+                A boolean value to indicate if it was successful or not. If it
+                fails, there may be allocated resources that are not cleaned up.
+
+    D-BUS Properties:
+
+        Target (string):
+            This property is emitted for any listeners whenever the target is
+            changed. This allows listeners to act on changes to the focused
+            target and take actions such as changing a monitor input.
+
+    When the service is created, it reads settings from a given configuration
+    file (default: /etc/vfio-kvm.yaml) if it exists. This file is used to read
+    hotkeys for direct access to specific virtual machines, the host, or to
+    change the QEMU hotkey and D-BUS bus name and object path. It can also set
+    a hotkey to release the devices to the host without emitting a target change
+    or altering the position in the virtual machine cycle.
+
+    Valid options are:
+        dbus_bus_name: The D-BUS bus name to request. This should be of the
+            format:
+                org.domain.subdomain
+            The default is "vfio.kvm".
+        dbus_object_path: The D-BUS path to export on the requested bus. It
+            should be of the format:
+                /org/domain/subdomain
+            The default is "/vfio/kvm"
+        manage_cpu: A boolean value to determine if the service should manage
+            cputsets for pinned CPUs.
+            The default is false.
+        manage_hugepages: A boolean value to determine if the service should
+            manage allocated hugepages.
+            The default is false.
+        hotkey: A list of key names of the form KEY_XXXX that when pressed
+            together will cycle the active target to the next virtual machine.
+            This defaults to the standard QEMU hotkey combination of
+            KEY_LEFTCTRL and KEY_RIGHTCTRL.
+            If this hotkey is not set, but qemu_hotkey is set
+            this will use the value in qemu_hotkey.
+        qemu_hotkey: A list of key names of the form KEY_XXXX used by QEMU to
+            toggle between a host and a virtual machine. This is sent to virtual
+            machines when they become active if they are not currently grabbing
+            the virtual device.
+            This defaults to the standard QEMU hotkey combination of
+            KEY_LEFTCTRL and KEY_RIGHTCTRL.
+        release_hotkey: A list of key names of the form KEY_XXXX that when
+            pressed together will return control of the devices to the host
+            machine until it is pressed again or the target is changed.
+            There is no default value.
+        host: A mapping of settings specific to the host device. Currently,
+            only the "hotkey" setting is understood.
+            hotkey: A list of key names of the form KEY_XXXX that when pressed
+                together will set the active target to the host machine.
+        vm: A mapping of virtual machine names to settings specific to that
+            virtual machine. Each virtual machine supports the same options as
+            the host setting.
+    """
 
     _DEFAULT_CONFIG_PATH = pathlib.Path("/etc/vfio-kvm.yaml")
     _DEFAULT_QEMU_HOTKEY = ("KEY_LEFTCTRL", "KEY_RIGHTCTRL")
-    _DEFAULT_HOTKEY = _DEFAULT_QEMU_HOTKEY
 
-    _BUS_NAME = "vfio.kvm"
-    _OBJ_PATH = "/vfio/kvm"
+    _DEFAULT_BUS_NAME = "vfio.kvm"
+    _DEFAULT_OBJ_PATH = "/vfio/kvm"
 
     async def __new__(cls, *args, **kwargs):
         """A workaround for async __init__ functions."""
@@ -132,9 +218,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
         await instance.__init__(*args, **kwargs)
         return instance
 
-    async def __init__(
-        self, config: pathlib.Path = None, bus: str = None, path: str = None
-    ) -> None:
+    async def __init__(self, config: pathlib.Path = None) -> None:
         """Create a new D-BUS service for managing virtual machines.
 
         Requesting a bus name that the running user does not have access to will
@@ -147,7 +231,6 @@ class VfioKvmService(dbus.service.ServiceInterface):
             bus: The bus name to request from D-BUS.
             path: The D-BUS path to export on the requested bus for this service.
         """
-        super().__init__(bus or self._BUS_NAME)
         self._released = False
         self._vm_options: Dict[Optional[str], VmOptions] = {}
         self._devices = {}
@@ -156,7 +239,8 @@ class VfioKvmService(dbus.service.ServiceInterface):
         self._manage_cpu = False
         self._manage_hugepages = False
         self._configure(config)
-        await self._init_dbus(bus or self._BUS_NAME, path or self._OBJ_PATH)
+        super().__init__(self._bus_name)
+        await self._init_dbus(self._bus_name, self._dbus_path)
         logging.info("Listening for libvirtd events")
 
     def _configure(self, config: pathlib.Path = None) -> None:
@@ -181,13 +265,14 @@ class VfioKvmService(dbus.service.ServiceInterface):
                 for key, value in data.get("vm", {}).items()
             }
         )
+        self._bus_name = data.get("dbus_bus_name", self._DEFAULT_BUS_NAME)
+        self._dbus_path = data.get("dbus_object_path", self._DEFAULT_OBJ_PATH)
         self._manage_cpu = data.get("manage_cpu", False)
         self._manage_hugepages = data.get("manage_hugepages", False)
         self._release_hotkey = self._parse_hotkeys(data.get("release_hotkey", []))
-        self._hotkey = self._parse_hotkeys(data.get("hotkey", self._DEFAULT_HOTKEY))
-        self._qemu_hotkey = self._parse_hotkeys(
-            data.get("qemu_hotkey", self._DEFAULT_QEMU_HOTKEY)
-        )
+        qemu_hotkey = data.get("qemu_hotkey", self._DEFAULT_QEMU_HOTKEY)
+        self._qemu_hotkey = self._parse_hotkeys(qemu_hotkey)
+        self._hotkey = self._parse_hotkeys(data.get("hotkey", qemu_hotkey))
 
     def _parse_hotkeys(self, hotkey: Optional[Iterable[str]]) -> Optional[Hotkey]:
         """Convert a list of strings representing keys to a set of int codes.
@@ -501,11 +586,36 @@ class VfioKvmService(dbus.service.ServiceInterface):
             return False
 
     def _unpin_cpus(self, cpu: Tuple[int, ...]) -> None:
+        """Remove process restrictions to CPUs used by the the virtual machine.
+
+        If the "manage_cpu" option is enabled, it will set cpusets to allow
+        the kernel to add processes to the CPUs that were pinned by the virtual
+        machine.
+
+        Arg:
+            cpu: A tuple of integers of CPUs to allow. These should match up
+                to pinned CPUs from the virtual machine XML configuration.
+        """
         if not self._manage_cpu or not cpu:
             return
         logging.info("Unpinning CPUs: %s", ", ".join(str(c) for c in sorted(cpu)))
 
     def _deallocate_hugepages(self, gb_pages: int, mb_pages: int) -> None:
+        """Deallocate memory used for hugepages by the virtual machine.
+
+        If the "manage_hugepages" option is enabled and the virtual machine XML
+        specifies "<hugepages/>" it will try to free any hugepages used by the
+        virtual machine.
+
+        Args:
+            gb_pages: The number of 1GB hugepages to deallocate. This should be
+                calculated by dividing the memory requested for the virtual
+                machine into 1GB chunks.
+            mb_pages: The number of 2MB hugepages to deallocate. This should be
+                calculated by taking the remainder of the memory requested for
+                the virtual machine after dividing it into 1GB chunks and then
+                dividing that into 2MB chunks.
+        """
         if not self._manage_hugepages or (not gb_pages and not mb_pages):
             return
         logging.info(
@@ -515,6 +625,32 @@ class VfioKvmService(dbus.service.ServiceInterface):
     def _destroy_devices(
         self, vm_name: str, devices: Set[str], guest_hotkey: Hotkey = None
     ) -> None:
+        """Destroy devices created for use with the virtual machine.
+
+        While parsing the XML configuration for the virtual machine all input
+        devices starting with "/dev/input/by-id/{vm_name}-" are extracted from
+        passthrough input tags and qemu:arg tags and passed to this function.
+
+        All devices used by the virtual machine and given the prefix
+        "{vm_name}-" will be destroyed.
+
+        If this is the last virtual machine managed by this service, the source
+        device will be freed and the ReplicatedDevice will be deleted.
+
+        Args:
+            vm_name: The name of the virtual machine. This is used to determine
+                the true source device from the requested guest source device
+                given.
+            devices: A tuple of strings representing devices that the virtual
+                machine had created that should be destroyed. They are of the
+                form:
+                    /dev/input/by-id/{vm_name}-{device-ID}
+                The vm_name is removed to give a source device of the form:
+                    /dev/input/by-id/{device-ID}
+            guest_hotkey: A hotkey that the device used to monitor to switch the
+                target to this specific virtual machine. This is necessary to
+                remove it from the hotkeys monitored by the device.
+        """
         is_last_vm = len(self._targets) == 1
         for guest_source in devices:
             source = os.path.join(
@@ -604,54 +740,51 @@ class ReplicatedDevice:
         return self._targets[self._manager.target]
 
     async def _replicate(self) -> None:
+        if not self._source:
+            return
+
+        source = self._source
         is_release = False
         is_toggle = False
         hotkey_triggered: Optional[Hotkey] = None
 
         async def handle_release(active_keys: Hotkey) -> None:
-            if not self._source:
-                return
             nonlocal is_release
             if event.value == 1 and active_keys == self._manager.release_hotkey:
                 is_release = True
-            elif is_release and not self._source.active_keys():
+            elif is_release and not source.active_keys():
                 self._target.syn()
                 await asyncio.sleep(0.1)
                 is_release = False
                 self._manager.released = not self._manager.released
 
         async def handle_toggle(active_keys: Hotkey) -> None:
-            if not self._source:
-                return
             nonlocal is_toggle
             if event.value == 1 and active_keys == self._manager.hotkey:
                 is_toggle = True
-            elif is_toggle and not self._source.active_keys():
+            elif is_toggle and not source.active_keys():
                 self._target.syn()
                 await asyncio.sleep(0.1)
                 is_toggle = False
                 self._manager.toggle()
 
         async def handle_hotkeys(active_keys: Hotkey) -> None:
-            if not self._source:
-                return
             nonlocal hotkey_triggered
             if event.value == 1 and active_keys in self._hotkeys:
                 hotkey_triggered = active_keys
-            elif hotkey_triggered and not self._source.active_keys():
+            elif hotkey_triggered and not source.active_keys():
                 self._target.syn()
                 await asyncio.sleep(0.1)
                 self._manager.target = self._hotkeys[hotkey_triggered]
                 hotkey_triggered = None
 
-        if self._source:
-            async for event in self._source.async_read_loop():
-                self._target.write_event(event)
-                if event.type == evdev.ecodes.EV_KEY:
-                    active_keys = frozenset(self._source.active_keys())
-                    await handle_release(active_keys)
-                    await handle_toggle(active_keys)
-                    await handle_hotkeys(active_keys)
+        async for event in source.async_read_loop():
+            self._target.write_event(event)
+            if event.type == evdev.ecodes.EV_KEY:
+                active_keys = frozenset(source.active_keys())
+                await handle_release(active_keys)
+                await handle_toggle(active_keys)
+                await handle_hotkeys(active_keys)
 
     def grab(self) -> None:
         if not self._manager.target:
@@ -716,7 +849,7 @@ class ReplicatedDevice:
 def handle_exception(task: asyncio.Task) -> None:
     """Handle any exceptions that occur in tasks.
 
-    Log all errors and stop the event loop when any exception of than
+    Log all errors and stop the event loop when any exception other than
     asyncio.CancelledError is raised.
 
     Args:
