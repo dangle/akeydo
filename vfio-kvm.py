@@ -7,7 +7,7 @@ Classes:
     DbusTypes: An enumeration of types used by dbus_next.
     VmOptions: A dataclass containing options for virtual machines configured at
         launch and not in the XML configuration of the virtual machine.
-    VmConfig: A dataclass containing the relevant parsed sections of a virtual
+    VmConfig: A class containing the relevant parsed sections of a virtual
         machine's XML configuration during the virtual machine's start.
     VfioKvmService: The service that manages hardware alterations and
         replications as well as signaling when a new virtual machine has focus.
@@ -26,11 +26,10 @@ Functions:
 
 
 from typing import (
-    Any,
-    Dict,
     FrozenSet,
     List,
     Optional,
+    Set,
     Tuple,
     Union,
 )
@@ -48,7 +47,7 @@ import evdev
 import yaml
 
 
-Hotkey = FrozenSet[int]  # A hashable representation of a hotkey.
+Hotkey = FrozenSet[int]
 
 
 class DbusTypes:
@@ -65,24 +64,24 @@ class VmOptions:
     hotkey: Hotkey = dataclasses.field(default_factory=frozenset)
 
 
-@dataclasses.dataclass
 class VmConfig:
-    """Dataclass to hold parsed virtual-machine XML configuration values."""
-
-    devices: Tuple[str] = dataclasses.field(default_factory=list)
-    cpu: Tuple[int] = dataclasses.field(default_factory=list)
-    hugepages1G: int = 0
-    hugepages2M: int = 0
+    """A representation of virtual-machine XML configuration values."""
 
     def __init__(self, xml_config: str):
+        """XXX"""
         root = xml.fromstring(xml_config)
-        self.cpu = (int(e.get("cpuset")) for e in root.findall(".//cputune/vcpupin"))
         hugepages = root.find(".//memoryBacking/hugepages") is not None
         memory = int(root.findtext(".//memory"))
         mem_in_mb = memory // 1024
-        self.hugepages1G = mem_in_mb // 1024 if hugepages else 0
-        self.hugepages2M = mem_in_mb % self.hugepages1G if hugepages else 0
-        self.devices = (
+        self.hugepages1G: int = mem_in_mb // 1024 if hugepages else 0
+        self.hugepages2M: int = mem_in_mb % self.hugepages1G if hugepages else 0
+        self.cpu: List[int] = (
+            int(e.get("cpuset")) for e in root.findall(".//cputune/vcpupin")
+        )
+        self.devices: Set[str] = {
+            e.get("evdev")
+            for e in root.findall(".//devices/input[@type='passthrough']/source")
+        } | {
             param[6:]
             for e in root.findall(
                 ".//qemu:commandline/qemu:arg",
@@ -91,10 +90,12 @@ class VmConfig:
             if "evdev=" in e.get("value")
             for param in e.get("value").split(",")
             if param.startswith("evdev=")
-        )
+        }
 
 
 class VfioKvmService(dbus.service.ServiceInterface):
+    """XXX"""
+
     _DEFAULT_CONFIG_PATH = "/etc/vfio-kvm.yaml"
     _DEFAULT_QEMU_HOTKEY = ("KEY_LEFTCTRL", "KEY_RIGHTCTRL")
     _DEFAULT_HOTKEY = _DEFAULT_QEMU_HOTKEY
@@ -119,6 +120,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
             path: XXX
         """
         super().__init__(bus or self._BUS_NAME)
+        self._released = False
         self._vm_options = {}
         self._devices = {}
         self._targets = [None]
@@ -130,6 +132,11 @@ class VfioKvmService(dbus.service.ServiceInterface):
         logging.info("Listening for libvirtd events")
 
     def _parse_config(self, config: str) -> None:
+        """XXX
+
+        Args:
+            config: XXX
+        """
         config = config or self._DEFAULT_CONFIG_PATH
         if not os.path.isfile(config):
             return
@@ -147,10 +154,20 @@ class VfioKvmService(dbus.service.ServiceInterface):
         )
         self._manage_cpu = data.get("manage_cpu", False)
         self._manage_hugepages = data.get("manage_hugepages", False)
-        self._configure_hotkey(data.get("hotkey"))
-        self._configure_qemu_hotkey(data.get("qemu_hotkey"))
+        self._release_hotkey = self._parse_hotkeys(data.get("release_hotkey", []))
+        self._hotkey = self._parse_hotkeys(data.get("hotkey", self._DEFAULT_HOTKEY))
+        self._qemu_hotkey = self._parse_hotkeys(
+            data.get("qemu_hotkey", self._DEFAULT_QEMU_HOTKEY)
+        )
 
     def _parse_hotkeys(self, hotkey: List[str]) -> Hotkey:
+        """XXX
+
+        Args:
+            hotkey: XXX
+
+        Returns: XXX
+        """
         try:
             return frozenset(evdev.ecodes.ecodes[key] for key in hotkey)
         except:
@@ -161,19 +178,19 @@ class VfioKvmService(dbus.service.ServiceInterface):
             )
             return frozenset()
 
-    def _configure_hotkey(self, keys: List[str]) -> None:
-        self._hotkey = self._parse_hotkeys(keys or self._DEFAULT_HOTKEY)
-
-    def _configure_qemu_hotkey(self, keys: List[str]) -> None:
-        self._qemu_hotkey = self._parse_hotkeys(keys or self._DEFAULT_QEMU_HOTKEY)
-
     async def _configure_dbus(self, bus: str, path: str) -> None:
+        """XXX
+
+        Args:
+            bus: XXX
+            path: XXX
+        """
         _bus = await dbus.aio.MessageBus(
             bus_type=dbus.constants.BusType.SYSTEM
         ).connect()
         _bus.export(path, self)
         logging.debug("Requesting bus name %s", _bus.unique_name)
-        await _bus.request_name(bus)
+        await asyncio.wait_for(_bus.request_name(bus), timeout=30)
         logging.debug("Bus name %s granted", _bus.unique_name)
 
     @functools.cached_property
@@ -183,6 +200,20 @@ class VfioKvmService(dbus.service.ServiceInterface):
     @functools.cached_property
     def qemu_hotkey(self) -> Hotkey:
         return frozenset(self._qemu_hotkey)
+
+    @functools.cached_property
+    def release_hotkey(self) -> Hotkey:
+        return frozenset(self._release_hotkey)
+
+    @property
+    def released(self):
+        return self._released
+
+    @released.setter
+    def released(self, value: bool) -> bool:
+        logging.debug(f"Released state set to {value}")
+        self._released = value
+        return self._released
 
     def stop(self) -> None:
         for device in self._devices.values():
@@ -199,6 +230,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
             logging.debug("%s selected but %s is already active", display, display)
             return
         logging.info("%s selected", display)
+        self._released = False
         self._target = val
         for device in self._devices.values():
             device.grab()
@@ -219,7 +251,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
         extra_op: DbusTypes.String,
         xml_config: DbusTypes.String,
     ) -> DbusTypes.Boolean:
-        logging.info("VM %s starting up", vm_name)
+        logging.info("VM %s preparing to start", vm_name)
         logging.debug("libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config)
         config = VmConfig(xml_config)
         self._targets.append(vm_name)
@@ -319,6 +351,8 @@ class VfioKvmService(dbus.service.ServiceInterface):
 
 
 class ReplicatedDevice:
+    """XXX"""
+
     def __init__(
         self,
         source: str,
@@ -385,11 +419,24 @@ class ReplicatedDevice:
 
     @property
     def _target(self) -> evdev.device.InputDevice:
-        return self._targets.get(self._manager.target)
+        return self._targets.get(
+            None if self._manager.released else self._manager.target
+        )
 
     async def _replicate(self) -> None:
+        is_release = False
         is_toggle = False
         hotkey_triggered = None
+
+        async def handle_release(active_keys: Hotkey) -> None:
+            nonlocal is_release
+            if event.value == 1 and active_keys == self._manager.release_hotkey:
+                is_release = True
+            elif is_release and not self._source.active_keys():
+                self._target.syn()
+                await asyncio.sleep(0.1)
+                is_release = False
+                self._manager.released = not self._manager.released
 
         async def handle_toggle(active_keys: Hotkey) -> None:
             nonlocal is_toggle
@@ -416,6 +463,7 @@ class ReplicatedDevice:
                 self._target.write_event(event)
                 if event.type == evdev.ecodes.EV_KEY:
                     active_keys = frozenset(self._source.active_keys())
+                    await handle_release(active_keys)
                     await handle_toggle(active_keys)
                     await handle_hotkeys(active_keys)
         except asyncio.CancelledError:
@@ -427,9 +475,8 @@ class ReplicatedDevice:
         try:
             self._target.device.grab()
             self._target.device.ungrab()
-            return
         except IOError:
-            pass
+            return
         logging.debug("Grabbing device %s", self._get_device_path(self._manager.target))
         for value in (1, 0):
             for key in self._manager.qemu_hotkey:
