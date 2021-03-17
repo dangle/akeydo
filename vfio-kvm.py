@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-A service that reads libvirtd events from a hook and manages device creation and
-deletion, replication, CPU pinning, and hugepages allocation.
+A service that reads libvirtd events from a hook and manages VM resources.
 
 Classes:
     DbusTypes: An enumeration of types used by dbus_next.
@@ -74,6 +73,80 @@ class VmOptions:
 _EMPTY_VM_OPTIONS = VmOptions()
 
 
+class Settings:
+    """A class for parsing and storing configuration options for the service."""
+
+    def __init__(
+        self,
+        config: pathlib.Path,
+        default_qemu_hotkey: Tuple[str, ...],
+        default_bus_name: str,
+        default_obj_path: str,
+    ):
+        """Parse a YAML configuration file to configure this service.
+
+        Args:
+            config: A Path to a configuration file that contains settings for the
+                service including hotkeys used for mapping keys to virtual machines.
+        """
+        self.qemu_hotkey = self._parse_hotkeys(default_qemu_hotkey)
+        self.hotkey = self.qemu_hotkey
+        self.release_hotkey: Optional[Hotkey] = None
+        self.dbus_bus_name = default_bus_name
+        self.dbus_obj_path = default_obj_path
+        self.manage_cpu = False
+        self.manage_hugepages = False
+        self.vm_options: Dict[Optional[str], VmOptions] = {}
+
+        if not config.is_file():
+            return
+
+        with open(config.resolve()) as config_file:
+            data = yaml.safe_load(config_file) or {}
+        if "host" in data:
+            self.vm_options[None] = VmOptions(
+                self._parse_hotkeys(data["host"].get("hotkey"))
+            )
+        self.vm_options.update(
+            {
+                key: VmOptions(self._parse_hotkeys(value.get("hotkey")))
+                for key, value in data.get("vm", {}).items()
+            }
+        )
+        self.dbus_bus_name = data.get("dbus_bus_name", default_bus_name)
+        self.dbus_obj_path = data.get("dbus_object_path", default_obj_path)
+        self.manage_cpu = data.get("manage_cpu", False)
+        self.manage_hugepages = data.get("manage_hugepages", False)
+        self.release_hotkey = self._parse_hotkeys(data.get("release_hotkey", []))
+        qemu_hotkey = data.get("qemu_hotkey", default_qemu_hotkey)
+        self.qemu_hotkey = self._parse_hotkeys(qemu_hotkey)
+        self.hotkey = self._parse_hotkeys(data.get("hotkey", qemu_hotkey))
+
+    @staticmethod
+    def _parse_hotkeys(hotkey: Optional[Iterable[str]]) -> Optional[Hotkey]:
+        """Convert a list of strings representing keys to a set of int codes.
+
+        Args:
+            hotkey: An iterable containing strings of the format KEY_XXX defined
+                by the Linux kernel that can be converted to the integers
+                returned by keyboard presses.
+
+        Returns: A frozenset containing the integers represented by the strings
+            in the initial iterable. If any of the strings is unable to be
+            converted into an integer a warning will be logged and None will be
+            returned instead of a frozenset.
+        """
+        try:
+            return frozenset(evdev.ecodes.ecodes[key] for key in hotkey or ())
+        except KeyError:
+            logging.warning(
+                "Unable to match all keys in hotkey %s to integers. "
+                "Hotkey will be unavailable.",
+                hotkey,
+            )
+            return None
+
+
 class VmConfig:
     """A representation of virtual-machine XML configuration values."""
 
@@ -95,9 +168,9 @@ class VmConfig:
         mem_in_mb = memory // 1024
         mem_in_gb = mem_in_mb // 1024
         extra_memory = mem_in_mb % 2
-        self.hugepages1G: int = mem_in_gb if hugepages else 0
-        self.hugepages2M: int = (
-            mem_in_mb % mem_in_gb / 2 + extra_memory if hugepages else 0
+        self.hugepages_1g: int = mem_in_gb if hugepages else 0
+        self.hugepages_2m: int = (
+            mem_in_mb % mem_in_gb // 2 + extra_memory if hugepages else 0
         )
         self.cpu: Tuple[int, ...] = tuple(
             int(e.get("cpuset", "0")) for e in root.findall(".//cputune/vcpupin")
@@ -119,8 +192,7 @@ class VmConfig:
 
 
 class VfioKvmService(dbus.service.ServiceInterface):
-    """A D-BUS service that creates and manages virtual devices for libvirt
-    virtual machines.
+    """A D-BUS service that creates and manages virtual devices for libvirt VMs.
 
     D-Bus Methods:
 
@@ -208,7 +280,6 @@ class VfioKvmService(dbus.service.ServiceInterface):
 
     _DEFAULT_CONFIG_PATH = pathlib.Path("/etc/vfio-kvm.yaml")
     _DEFAULT_QEMU_HOTKEY = ("KEY_LEFTCTRL", "KEY_RIGHTCTRL")
-
     _DEFAULT_BUS_NAME = "vfio.kvm"
     _DEFAULT_OBJ_PATH = "/vfio/kvm"
 
@@ -231,71 +302,22 @@ class VfioKvmService(dbus.service.ServiceInterface):
             bus: The bus name to request from D-BUS.
             path: The D-BUS path to export on the requested bus for this service.
         """
+        self._settings = Settings(
+            config or self._DEFAULT_CONFIG_PATH,
+            self._DEFAULT_QEMU_HOTKEY,
+            self._DEFAULT_BUS_NAME,
+            self._DEFAULT_OBJ_PATH,
+        )
         self._released = False
         self._vm_options: Dict[Optional[str], VmOptions] = {}
         self._devices = {}
         self._targets = [None]  # None represents the host as a target
         self._target = None
-        self._manage_cpu = False
-        self._manage_hugepages = False
-        self._configure(config)
-        super().__init__(self._bus_name)
-        await self._init_dbus(self._bus_name, self._dbus_path)
-        logging.info("Listening for libvirtd events")
-
-    def _configure(self, config: pathlib.Path = None) -> None:
-        """Parse a YAML configuration file to configure this service.
-
-        Args:
-            config: A Path to a configuration file that contains settings for the
-                service including hotkeys used for mapping keys to virtual machines.
-        """
-        config = config or self._DEFAULT_CONFIG_PATH
-        if not config.is_file():
-            return
-        with open(config.resolve()) as fp:
-            data = yaml.safe_load(fp) or {}
-        if "host" in data:
-            self._vm_options[None] = VmOptions(
-                self._parse_hotkeys(data["host"].get("hotkey"))
-            )
-        self._vm_options.update(
-            {
-                key: VmOptions(self._parse_hotkeys(value.get("hotkey")))
-                for key, value in data.get("vm", {}).items()
-            }
+        super().__init__(self._settings.dbus_bus_name)
+        await self._init_dbus(
+            self._settings.dbus_bus_name, self._settings.dbus_obj_path
         )
-        self._bus_name = data.get("dbus_bus_name", self._DEFAULT_BUS_NAME)
-        self._dbus_path = data.get("dbus_object_path", self._DEFAULT_OBJ_PATH)
-        self._manage_cpu = data.get("manage_cpu", False)
-        self._manage_hugepages = data.get("manage_hugepages", False)
-        self._release_hotkey = self._parse_hotkeys(data.get("release_hotkey", []))
-        qemu_hotkey = data.get("qemu_hotkey", self._DEFAULT_QEMU_HOTKEY)
-        self._qemu_hotkey = self._parse_hotkeys(qemu_hotkey)
-        self._hotkey = self._parse_hotkeys(data.get("hotkey", qemu_hotkey))
-
-    def _parse_hotkeys(self, hotkey: Optional[Iterable[str]]) -> Optional[Hotkey]:
-        """Convert a list of strings representing keys to a set of int codes.
-
-        Args:
-            hotkey: An iterable containing strings of the format KEY_XXX defined
-                by the Linux kernel that can be converted to the integers
-                returned by keyboard presses.
-
-        Returns: A frozenset containing the integers represented by the strings
-            in the initial iterable. If any of the strings is unable to be
-            converted into an integer a warning will be logged and None will be
-            returned instead of a frozenset.
-        """
-        try:
-            return frozenset(evdev.ecodes.ecodes[key] for key in hotkey or ())
-        except KeyError:
-            logging.warning(
-                "Unable to match all keys in hotkey %s to integers. "
-                "Hotkey will be unavailable.",
-                hotkey,
-            )
-            return None
+        logging.info("Listening for libvirtd events")
 
     async def _init_dbus(self, bus: str, path: str) -> None:
         """Initialize D-BUS with the given bus name and path.
@@ -317,18 +339,17 @@ class VfioKvmService(dbus.service.ServiceInterface):
     @property
     def hotkey(self) -> Optional[Hotkey]:
         """Return the hotkey for toggling focus between virtual machines."""
-        return self._hotkey
+        return self._settings.hotkey
 
     @property
     def qemu_hotkey(self) -> Optional[Hotkey]:
         """Return the hotkey used by QEMU to toggle between a guest and host."""
-        return self._qemu_hotkey
+        return self._settings.qemu_hotkey
 
     @property
     def release_hotkey(self) -> Optional[Hotkey]:
-        """Return the hotkey used to release devices to the host without
-        changing the target."""
-        return self._release_hotkey
+        """Return the hotkey used to release devices to the host."""
+        return self._settings.release_hotkey
 
     @property
     def released(self):
@@ -341,7 +362,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
 
         Returns the new device released state.
         """
-        logging.debug(f"Released state set to {value}")
+        logging.debug("Released state set to %s", value)
         self._released = value
         return self._released
 
@@ -434,7 +455,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
             config = VmConfig(xml_config)
             self._targets.append(vm_name)
             self._pin_cpus(config.cpu)
-            self._allocate_hugepages(config.hugepages1G, config.hugepages2M)
+            self._allocate_hugepages(config.hugepages_1g, config.hugepages_2m)
             self._create_devices(
                 vm_name,
                 config.devices,
@@ -442,7 +463,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
                 self._vm_options.get(vm_name, _EMPTY_VM_OPTIONS).hotkey,
             )
             return True
-        except Exception as e:
+        except Exception:
             logging.exception(
                 "An exception occurred while preparing a virtual machine."
             )
@@ -458,7 +479,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
             cpu: A tuple of integers of CPUs to restrict. These should match up
                 to pinned CPUs from the virtual machine XML configuration.
         """
-        if not self._manage_cpu or not cpu:
+        if not self._settings.manage_cpu or not cpu:
             return
         logging.info("Pinning CPUs: %s", ", ".join(str(c) for c in sorted(cpu)))
 
@@ -478,7 +499,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
                 the virtual machine after dividing it into 1GB chunks and then
                 dividing that into 2MB chunks.
         """
-        if not self._manage_hugepages or (not gb_pages and not mb_pages):
+        if not self._settings.manage_hugepages or (not gb_pages and not mb_pages):
             return
         logging.info(
             "Allocating %d 1G hugepages and %d 2M hugepages", gb_pages, mb_pages
@@ -576,10 +597,10 @@ class VfioKvmService(dbus.service.ServiceInterface):
             if self._target == vm_name:
                 self.target = None
             self._destroy_devices(vm_name, config.devices)
-            self._deallocate_hugepages(config.hugepages1G, config.hugepages2M)
+            self._deallocate_hugepages(config.hugepages_1g, config.hugepages_2m)
             self._unpin_cpus(config.cpu)
             return True
-        except Exception as e:
+        except Exception:
             logging.exception(
                 "An exception occurred while preparing a virtual machine."
             )
@@ -596,7 +617,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
             cpu: A tuple of integers of CPUs to allow. These should match up
                 to pinned CPUs from the virtual machine XML configuration.
         """
-        if not self._manage_cpu or not cpu:
+        if not self._settings.manage_cpu or not cpu:
             return
         logging.info("Unpinning CPUs: %s", ", ".join(str(c) for c in sorted(cpu)))
 
@@ -616,7 +637,7 @@ class VfioKvmService(dbus.service.ServiceInterface):
                 the virtual machine after dividing it into 1GB chunks and then
                 dividing that into 2MB chunks.
         """
-        if not self._manage_hugepages or (not gb_pages and not mb_pages):
+        if not self._settings.manage_hugepages or (not gb_pages and not mb_pages):
             return
         logging.info(
             "Deallocating %d 1G hugepages and %d 2M hugepages", gb_pages, mb_pages
@@ -677,7 +698,7 @@ class ReplicatedDevice:
         host_hotkey: Optional[Hotkey] = None,
     ) -> None:
         if not os.path.exists(source) or not stat.S_ISCHR(os.stat(source).st_mode):
-            raise IOError("No such device: %s", source)
+            raise IOError(f"No such device: {source}")
         self._name = os.path.basename(source)
         self._source_path = source
         self._source: Optional[evdev.InputDevice] = None
@@ -702,11 +723,11 @@ class ReplicatedDevice:
         self, target: str, *, key: Union[bool, None, str] = False
     ) -> None:
         path = self._get_device_path(target)
-        logging.info(f"Creating {target} device %s", path)
+        logging.info("Creating %s device %s", target, path)
         device = evdev.UInput.from_device(self._source)
         self._targets[key if key is not False else target] = device
         if os.path.islink(path):
-            logging.debug(f"Removing existing symlink %s", path)
+            logging.debug("Removing existing symlink %s", path)
             os.unlink(path)
         os.symlink(device.device, path)
 
@@ -717,9 +738,9 @@ class ReplicatedDevice:
         if index not in self._targets:
             return
         path = self._get_device_path(target)
-        logging.info(f"Destroying {target} device %s", path)
+        logging.info("Destroying %s device %s", target, path)
         if os.path.islink(path):
-            logging.debug(f"Removing symlink %s", path)
+            logging.debug("Removing symlink %s", path)
             os.unlink(path)
         self._targets.pop(index).close()
 
@@ -736,8 +757,9 @@ class ReplicatedDevice:
             await asyncio.sleep(5)
 
     @property
-    def _target(self) -> evdev.device.InputDevice:
-        return self._targets[self._manager.target]
+    def _target(self) -> Optional[evdev.device.InputDevice]:
+        """Get the device for the currently active target."""
+        return self._targets.get(self._manager.target)
 
     async def _replicate(self) -> None:
         if not self._source:
@@ -748,46 +770,47 @@ class ReplicatedDevice:
         is_toggle = False
         hotkey_triggered: Optional[Hotkey] = None
 
-        async def handle_release(active_keys: Hotkey) -> None:
+        async def handle_release(event: evdev.InputEvent, active_keys: Hotkey) -> None:
             nonlocal is_release
             if event.value == 1 and active_keys == self._manager.release_hotkey:
                 is_release = True
-            elif is_release and not source.active_keys():
+            elif self._target and is_release and not source.active_keys():
                 self._target.syn()
                 await asyncio.sleep(0.1)
                 is_release = False
                 self._manager.released = not self._manager.released
 
-        async def handle_toggle(active_keys: Hotkey) -> None:
+        async def handle_toggle(event: evdev.InputEvent, active_keys: Hotkey) -> None:
             nonlocal is_toggle
             if event.value == 1 and active_keys == self._manager.hotkey:
                 is_toggle = True
-            elif is_toggle and not source.active_keys():
+            elif self._target and is_toggle and not source.active_keys():
                 self._target.syn()
                 await asyncio.sleep(0.1)
                 is_toggle = False
                 self._manager.toggle()
 
-        async def handle_hotkeys(active_keys: Hotkey) -> None:
+        async def handle_hotkeys(event: evdev.InputEvent, active_keys: Hotkey) -> None:
             nonlocal hotkey_triggered
             if event.value == 1 and active_keys in self._hotkeys:
                 hotkey_triggered = active_keys
-            elif hotkey_triggered and not source.active_keys():
+            elif self._target and hotkey_triggered and not source.active_keys():
                 self._target.syn()
                 await asyncio.sleep(0.1)
                 self._manager.target = self._hotkeys[hotkey_triggered]
                 hotkey_triggered = None
 
         async for event in source.async_read_loop():
-            self._target.write_event(event)
-            if event.type == evdev.ecodes.EV_KEY:
-                active_keys = frozenset(source.active_keys())
-                await handle_release(active_keys)
-                await handle_toggle(active_keys)
-                await handle_hotkeys(active_keys)
+            if self._target:
+                self._target.write_event(event)
+                if event.type == evdev.ecodes.EV_KEY:
+                    active_keys = frozenset(source.active_keys())
+                    await handle_release(event, active_keys)
+                    await handle_toggle(event, active_keys)
+                    await handle_hotkeys(event, active_keys)
 
     def grab(self) -> None:
-        if not self._manager.target:
+        if not self._manager.target or not self._target:
             return
         try:
             self._target.device.grab()
@@ -825,7 +848,7 @@ class ReplicatedDevice:
         try:
             if self._source:
                 self._source.ungrab()
-                logging.info(f"Ungrabbed device %s", self._source.path)
+                logging.info("Ungrabbed device %s", self._source.path)
                 self._source.close()
                 self._source = None
         except IOError:
@@ -859,7 +882,7 @@ def handle_exception(task: asyncio.Task) -> None:
         task.result()
     except asyncio.CancelledError:
         pass
-    except:
+    except Exception:
         logging.exception("Exception raised by task %s", task.get_name())
         asyncio.get_event_loop().stop()
 
@@ -877,10 +900,8 @@ async def main() -> None:
         manager.stop()
         asyncio.get_event_loop().stop()
 
-    loop = asyncio.get_event_loop()
-
-    for s in (signal.SIGINT, signal.SIGQUIT, signal.SIGTERM):
-        loop.add_signal_handler(s, signal_handler)
+    for sig in (signal.SIGINT, signal.SIGQUIT, signal.SIGTERM):
+        loop.add_signal_handler(sig, signal_handler)
 
 
 if __name__ == "__main__":
