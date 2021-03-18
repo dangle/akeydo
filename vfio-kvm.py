@@ -138,7 +138,7 @@ class Settings:
             returned instead of a frozenset.
         """
         try:
-            return frozenset(evdev.ecodes.ecodes[key] for key in hotkey or ())
+            return frozenset(evdev.ecodes.ecodes[key] for key in hotkey or ()) or None
         except KeyError:
             logging.warning(
                 "Unable to match all keys in hotkey %s to integers. "
