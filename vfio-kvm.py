@@ -850,6 +850,12 @@ class ReplicatedDevice:
         is_release = False
 
         async def handle_release(event: evdev.InputEvent, active_keys: Hotkey) -> None:
+            """Detect the release hotkey and trigger a device release.
+
+            Args:
+                event: The current device input.
+                active_keys: The set of currently pressed keys.
+            """
             nonlocal is_release
             if event.value == 1 and active_keys == self._manager.release_hotkey:
                 is_release = True
@@ -862,6 +868,12 @@ class ReplicatedDevice:
         is_toggle = False
 
         async def handle_toggle(event: evdev.InputEvent, active_keys: Hotkey) -> None:
+            """Detect the toggle hotkey and toggle the currently active target.
+
+            Args:
+                event: The current device input.
+                active_keys: The set of currently pressed keys.
+            """
             nonlocal is_toggle
             if event.value == 1 and active_keys == self._manager.hotkey:
                 is_toggle = True
@@ -874,6 +886,12 @@ class ReplicatedDevice:
         hotkey_triggered: Optional[Hotkey] = None
 
         async def handle_hotkeys(event: evdev.InputEvent, active_keys: Hotkey) -> None:
+            """Detect VM hotkeys and toggle to specific virtual machines.
+
+            Args:
+                event: The current device input.
+                active_keys: The set of currently pressed keys.
+            """
             nonlocal hotkey_triggered
             if event.value == 1 and active_keys in self._hotkeys:
                 hotkey_triggered = active_keys
