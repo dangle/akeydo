@@ -107,6 +107,22 @@ the keypad are pressed together:
 ...
 ```
 
+### Adding a Custom Hotkey to Switch to the Host
+
+To add a custom hotkey that will switch directly to the host, edit the file
+`/etc/vfio-kvm.yaml` to add the following section:
+
+```yaml
+host:
+  hotkey:
+    - KEY_LEFTCTRL
+    - KEY_LEFTALT
+    - KEY_KP0
+```
+
+This hotkey will switch to the host when the left control, left alt, and the
+number zero on the keypad are pressed together.
+
 ## Troubleshooting
 
 - The VM won't start when configured to use the `guest` devices
