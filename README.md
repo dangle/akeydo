@@ -1,6 +1,6 @@
 # vfio-kvm
 
-A systemd service that send a D-Bus signal when the QEMU `evdev` hotkey is
+A systemd service that sends a D-Bus signal when the QEMU `evdev` hotkey is
 triggered.
 
 When using a virtual machine with `evdev` passthrough QEMU allows the devices to
