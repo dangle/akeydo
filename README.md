@@ -81,7 +81,28 @@ dbus-monitor --system "type='signal',sender='vfio.kvm'"
 To see a [complete example](examples/ddccontrol-client.sh) that triggers
 [ddccontrol](https://github.com/ddccontrol/ddccontrol), look in the [examples](examples/) folder.
 
-## Adding a Custom Hotkey to Switch to a Virtual Machine
+## Adding Custom Hotkeys
+
+The service can be configured to look for additional hotkeys and reroute device
+input.
+
+### Adding a Custom Hotkey to Switch to the Host
+
+To add a custom hotkey that will switch directly to the host, edit the file
+`/etc/vfio-kvm.yaml` to add the following section:
+
+```yaml
+host:
+  hotkey:
+    - KEY_LEFTCTRL
+    - KEY_LEFTALT
+    - KEY_KP0
+```
+
+This hotkey will switch to the host when the left control, left alt, and the
+number zero on the keypad are pressed together.
+
+### Adding a Custom Hotkey to Switch to a Virtual Machine
 
 To add a custom hotkey that will switch directly to a specific virtual machine,
 update the `<metadata>` block of the virtual machine XML configuration to
@@ -107,21 +128,22 @@ the keypad are pressed together:
 ...
 ```
 
-### Adding a Custom Hotkey to Switch to the Host
+### Adding a Custom Hotkey to Release Control of Devices without Toggling
 
-To add a custom hotkey that will switch directly to the host, edit the file
+To add a custom hotkey that will release all devices to the host without sending
+out a D-BUS signal or updating the active target, edit the file
 `/etc/vfio-kvm.yaml` to add the following section:
 
 ```yaml
-host:
-  hotkey:
-    - KEY_LEFTCTRL
-    - KEY_LEFTALT
-    - KEY_KP0
+release_hotkey:
+  - KEY_LEFTCTRL
+  - KEY_LEFTALT
+  - KEY_PAUSE
 ```
 
-This hotkey will switch to the host when the left control, left alt, and the
-number zero on the keypad are pressed together.
+This hotkey will release all devices to the host when the left control, left
+alt, and the pause key are pressed together. Pressing this hotkey again will
+cause the active virtual machine to re-grab the devices.
 
 ## Troubleshooting
 
