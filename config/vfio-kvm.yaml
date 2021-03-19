@@ -1,5 +1,33 @@
-hotkey:
-  - KEY_LEFTCTRL
-  - KEY_RIGHTCTRL
-delay: 0
-devices:
+# Uncomment the following option to have VFIO-KVM manage CPU pinning.
+# Default: false
+#
+# manage_cpu: true
+
+# Uncomment the following option to have VFIO-KVM manage huge page allocation.
+# Default: false
+#
+# manage_hugepages: true
+
+# Uncomment the following section to set a hotkey that will switch directly to
+# the host machine.
+#
+# host:
+#   hotkey:
+#     - KEY_LEFTCTRL
+#     - KEY_LEFTALT
+#     - KEY_KP0
+
+# The following section can be used as a template for setting hotkeys to switch
+# directly to specific virtual machines.
+#
+# vm:
+#   vm1:
+#     hotkey:
+#       - KEY_LEFTCTRL
+#       - KEY_LEFTALT
+#       - KEY_KP1
+#   vm2:
+#     hotkey:
+#       - KEY_LEFTCTRL
+#       - KEY_LEFTALT
+#       - KEY_KP2
