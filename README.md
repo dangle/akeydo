@@ -24,6 +24,8 @@ number of virtual machines.
 
 ```shell
 yay -Sy vfio-kvm
+systemctl enable vfio-kvm.service
+systemctl start vfio-kvm.service
 ```
 
 ### Manual Installation
