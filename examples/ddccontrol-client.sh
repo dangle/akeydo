@@ -15,8 +15,8 @@ function monitor_listener() {
     while read x; do
       case "$x" in
       *'string "host device"'*)
-        # The host device is identified by the following string to separate it
-        # from virtual machines.
+        # The host device is identified by the string "host device" to
+        # distinguish it from virtual machines.
         ddccontrol -r ${MONITOR} -w ${DP1} dev:/dev/i2c-9
         ;;
       *"string \"${VM1}\""*)
