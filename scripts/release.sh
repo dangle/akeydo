@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VM=${1:-"win10"}
+VM=${1}
 
 dbus-send \
     --system \
