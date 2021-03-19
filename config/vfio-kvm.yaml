@@ -1,3 +1,10 @@
+# Uncomment the following section to set a hotkey to release devices to the host
+# without updating the target.
+#
+# release_hotkey:
+#   - KEY_LEFTCTRL
+#   - KEY_PAUSE
+
 # Uncomment the following option to have VFIO-KVM manage CPU pinning.
 # Default: false
 #

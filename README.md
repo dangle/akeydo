@@ -81,6 +81,32 @@ dbus-monitor --system "type='signal',sender='vfio.kvm'"
 To see a [complete example](examples/ddccontrol-client.sh) that triggers
 [ddccontrol](https://github.com/ddccontrol/ddccontrol), look in the [examples](examples/) folder.
 
+## Adding a Custom Hotkey to Switch to a Virtual Machine
+
+To add a custom hotkey that will switch directly to a specific virtual machine,
+update the `<metadata>` block of the virtual machine XML configuration to
+include settings specific to VFIO-KVM.
+
+The following sample shows how to set a hotkey that will switch directly to the
+specific virtual machine when the left control, left alt, and the number one on
+the keypad are pressed together:
+
+```xml
+...
+<metadata>
+  ...
+  <vfiokvm:settings xmlns:vfiokvm="https://kvm.vfio/xmlns/libvirt/domain/1.0">
+    <vfiokvm:hotkey>
+      <vfiokvm:key value="KEY_LEFTCTRL"/>
+      <vfiokvm:key value="KEY_LEFTALT"/>
+      <vfiokvm:key value="KEY_KP1"/>
+    </vfiokvm:hotkey>
+  </vfiokvm:settings>
+  ...
+</metadata>
+...
+```
+
 ## Troubleshooting
 
 - The VM won't start when configured to use the `guest` devices

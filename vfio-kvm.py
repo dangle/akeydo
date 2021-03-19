@@ -19,6 +19,8 @@ Type Aliases:
         representing key presses used to trigger an action.
 
 Functions:
+    parse_hotkeys: Takes an iterable containing strings of the form KEY_XXXX and
+        converts them into a set of integers representing key values.
     handle_exception: Stops the event loop if a task has an exception.
     main: Called when this script is run as an executable. It creates the
         services and handles exceptions in the event loop.
@@ -90,7 +92,7 @@ class Settings:
             config: A Path to a configuration file that contains settings for the
                 service including hotkeys used for mapping keys to virtual machines.
         """
-        self.qemu_hotkey = self._parse_hotkeys(default_qemu_hotkey)
+        self.qemu_hotkey = parse_hotkeys(default_qemu_hotkey)
         self.hotkey = self.qemu_hotkey
         self.release_hotkey: Optional[Hotkey] = None
         self.dbus_bus_name = default_bus_name
@@ -105,12 +107,10 @@ class Settings:
         with open(config.resolve()) as config_file:
             data = yaml.safe_load(config_file) or {}
         if "host" in data:
-            self.vm_options[None] = VmOptions(
-                self._parse_hotkeys(data["host"].get("hotkey"))
-            )
+            self.vm_options[None] = VmOptions(parse_hotkeys(data["host"].get("hotkey")))
         self.vm_options.update(
             {
-                key: VmOptions(self._parse_hotkeys(value.get("hotkey")))
+                key: VmOptions(parse_hotkeys(value.get("hotkey")))
                 for key, value in data.get("vm", {}).items()
             }
         )
@@ -118,34 +118,10 @@ class Settings:
         self.dbus_obj_path = data.get("dbus_object_path", default_obj_path)
         self.manage_cpu = data.get("manage_cpu", False)
         self.manage_hugepages = data.get("manage_hugepages", False)
-        self.release_hotkey = self._parse_hotkeys(data.get("release_hotkey", []))
+        self.release_hotkey = parse_hotkeys(data.get("release_hotkey", []))
         qemu_hotkey = data.get("qemu_hotkey", default_qemu_hotkey)
-        self.qemu_hotkey = self._parse_hotkeys(qemu_hotkey)
-        self.hotkey = self._parse_hotkeys(data.get("hotkey", qemu_hotkey))
-
-    @staticmethod
-    def _parse_hotkeys(hotkey: Optional[Iterable[str]]) -> Optional[Hotkey]:
-        """Convert a list of strings representing keys to a set of int codes.
-
-        Args:
-            hotkey: An iterable containing strings of the format KEY_XXX defined
-                by the Linux kernel that can be converted to the integers
-                returned by keyboard presses.
-
-        Returns: A frozenset containing the integers represented by the strings
-            in the initial iterable. If any of the strings is unable to be
-            converted into an integer a warning will be logged and None will be
-            returned instead of a frozenset.
-        """
-        try:
-            return frozenset(evdev.ecodes.ecodes[key] for key in hotkey or ()) or None
-        except KeyError:
-            logging.warning(
-                "Unable to match all keys in hotkey %s to integers. "
-                "Hotkey will be unavailable.",
-                hotkey,
-            )
-            return None
+        self.qemu_hotkey = parse_hotkeys(qemu_hotkey)
+        self.hotkey = parse_hotkeys(data.get("hotkey", qemu_hotkey))
 
 
 class VmConfig:
@@ -169,6 +145,7 @@ class VmConfig:
         mem_in_mb = memory // 1024
         mem_in_gb = mem_in_mb // 1024
         extra_memory = mem_in_mb % 2
+
         self.hugepages_1g: int = mem_in_gb if hugepages else 0
         self.hugepages_2m: int = (
             mem_in_mb % mem_in_gb // 2 + extra_memory if hugepages else 0
@@ -190,6 +167,13 @@ class VmConfig:
             for param in val.split(",")
             if param.startswith(f"evdev=/dev/input/by-id/{name}-")
         }
+        self.hotkey: Optional[Hotkey] = parse_hotkeys(
+            e.get("value")
+            for e in root.findall(
+                ".//metadata/vfiokvm:settings/vfiokvm:hotkey/vfiokvm:key",
+                {"vfiokvm": "https://kvm.vfio/xmlns/libvirt/domain/1.0"},
+            )
+        )
 
 
 class VfioKvmService(dbus.service.ServiceInterface):
@@ -461,7 +445,8 @@ class VfioKvmService(dbus.service.ServiceInterface):
                 vm_name,
                 config.devices,
                 self._settings.vm_options.get(None, _EMPTY_VM_OPTIONS).hotkey,
-                self._settings.vm_options.get(vm_name, _EMPTY_VM_OPTIONS).hotkey,
+                config.hotkey
+                or self._settings.vm_options.get(vm_name, _EMPTY_VM_OPTIONS).hotkey,
             )
             return True
         except Exception:
@@ -1004,6 +989,30 @@ class ReplicatedDevice:
             self._hotkeys.pop(hotkey, None)
         if len(self._targets) == 1:
             self.stop()
+
+
+def parse_hotkeys(hotkey: Optional[Iterable[str]]) -> Optional[Hotkey]:
+    """Convert a list of strings representing keys to a set of int codes.
+
+    Args:
+        hotkey: An iterable containing strings of the format KEY_XXX defined
+            by the Linux kernel that can be converted to the integers
+            returned by keyboard presses.
+
+    Returns: A frozenset containing the integers represented by the strings
+        in the initial iterable. If any of the strings is unable to be
+        converted into an integer a warning will be logged and None will be
+        returned instead of a frozenset.
+    """
+    try:
+        return frozenset(evdev.ecodes.ecodes[key] for key in hotkey or ()) or None
+    except KeyError:
+        logging.warning(
+            "Unable to match all keys in hotkey %s to integers. "
+            "Hotkey will be unavailable.",
+            hotkey,
+        )
+        return None
 
 
 def handle_exception(task: asyncio.Task) -> None:
