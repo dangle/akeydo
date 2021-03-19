@@ -24,8 +24,7 @@ number of virtual machines.
 
 ```shell
 yay -Sy vfio-kvm
-systemctl enable vfio-kvm.service
-systemctl start vfio-kvm.service
+systemctl enable vfio-kvm.service --now
 ```
 
 ### Manual Installation
@@ -36,8 +35,7 @@ cp config/dbus/vfio-kvm.xml /etc/dbus-1/system.d/
 cp vfio-kvm.py /usr/bin/vfio-kvm
 chmod +x /usr/bin/vfio-kvm
 cp config/systemd/vfio-kvm.service /usr/lib/systemd/system/
-systemctl enable vfio-kvm.service
-systemctl start vfio-kvm.service
+systemctl enable vfio-kvm.service --now
 ```
 
 ## Using the Service
