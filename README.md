@@ -56,12 +56,12 @@ following XML segment to the libvirt XML for the virtual machine.
 ```
 
 For example, to passthrough the device `keyboard1` to the virtual machine named
-`windows` add the following XML segment to the `<devices>` section of the
-virtual machine configuration:
+`vm1` add the following XML segment to the `<devices>` section of the virtual
+machine configuration:
 
 ```xml
 <input type="passthrough" bus="virtio">
-  <source evdev="/dev/input/by-id/windows-keyboard1"/>
+  <source evdev="/dev/input/by-id/vm1-keyboard1"/>
 </input>
 ```
 
