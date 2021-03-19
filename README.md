@@ -45,13 +45,13 @@ following XML segment to the libvirt XML for the virtual machine.
 
 ```xml
 ...
-  <devices>
+<devices>
   ...
-    <input type="passthrough" bus="virtio">
-      <source evdev="/dev/input/by-id/<VM NAME>-<DEVICE NAME>"/>
-    </input>
+  <input type="passthrough" bus="virtio">
+    <source evdev="/dev/input/by-id/<VM NAME>-<DEVICE NAME>"/>
+  </input>
   ...
-  </devices>
+</devices>
 ...
 ```
 
@@ -60,9 +60,9 @@ For example, to passthrough the device `keyboard1` to the virtual machine named
 virtual machine configuration:
 
 ```xml
-    <input type="passthrough" bus="virtio">
-      <source evdev="/dev/input/by-id/windows-keyboard1"/>
-    </input>
+<input type="passthrough" bus="virtio">
+  <source evdev="/dev/input/by-id/windows-keyboard1"/>
+</input>
 ```
 
 The service will grab `/dev/input/by-id/keyboard1` and forward events from it to
