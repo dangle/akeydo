@@ -79,7 +79,7 @@ dbus-monitor --system "type='signal',sender='vfio.kvm'"
 ```
 
 To see a [complete example](examples/ddccontrol-client.sh) that triggers
-`ddccontrol`, look in the [examples](examples/) folder.
+[ddccontrol](https://github.com/ddccontrol/ddccontrol), look in the [examples](examples/) folder.
 
 ## Troubleshooting
 
