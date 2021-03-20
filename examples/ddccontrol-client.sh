@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 # Replace these values with the values for your monitor.
 MONITOR="0x60"
 DP1="15"
