@@ -1,0 +1,14 @@
+<busconfig>
+	<policy user="root">
+		<allow own_prefix="dev.akeydo" />
+		<allow send_destination="dev.akeydo" />
+	</policy>
+	<policy group="input">
+		<allow send_destination="dev.akeydo" />
+		<allow receive_sender="dev.akeydo" />
+	</policy>
+	<policy context="default">
+		<deny own_prefix="dev.akeydo"/>
+		<deny send_destination="dev.akeydo" />
+	</policy>
+</busconfig>

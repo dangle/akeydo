@@ -10,9 +10,9 @@ RESPONSE=$(dbus-send \
     --system \
     --print-reply \
     --type="method_call" \
-    --dest=vfio.kvm \
-    /vfio/kvm \
-    vfio.kvm.${OPERATION^} \
+    --dest=dev.akeydo \
+    /dev/akeydo \
+    dev.akeydo.${OPERATION^} \
     string:"${NAME}" \
     string:"${SUB_OPERATION}" \
     string:"${EXTRA_OPERATION}" \

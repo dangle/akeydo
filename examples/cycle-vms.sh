@@ -6,8 +6,8 @@ while :; do
   dbus-send \
     --system \
     --type="method_call" \
-    --dest=vfio.kvm \
-    /vfio/kvm \
-    vfio.kvm.Toggle
+    --dest=dev.akeydo \
+    /dev/akeydo \
+    dev.akeydo.Toggle
   sleep 60
 done

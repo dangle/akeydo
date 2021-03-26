@@ -1,5 +1,5 @@
 [Unit]
-Description=VFIO-KVM service
+Description=Akeydo service
 Before=libvirtd.target
 StartLimitIntervalSec=0
 
@@ -7,7 +7,7 @@ StartLimitIntervalSec=0
 Type=simple
 User=root
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/vfio-kvm
+ExecStart=/usr/bin/akeydo
 
 [Install]
 WantedBy=multi-user.target

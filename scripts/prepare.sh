@@ -6,9 +6,9 @@ dbus-send \
     --system \
     --print-reply \
     --type="method_call" \
-    --dest=vfio.kvm \
-    /vfio/kvm \
-    vfio.kvm.Prepare \
+    --dest=dev.akeydo \
+    /dev/akeydo \
+    dev.akeydo.Prepare \
     string:"${VM}" \
     string:"begin" \
     string:"-" \
