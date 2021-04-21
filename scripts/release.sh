@@ -6,9 +6,9 @@ dbus-send \
     --system \
     --print-reply \
     --type="method_call" \
-    --dest=vfio.kvm \
-    /vfio/kvm \
-    vfio.kvm.Release \
+    --dest=dev.akeydo \
+    /dev/akeydo \
+    dev.akeydo.Release \
     string:"${VM}" \
     string:"end" \
     string:"-" \
