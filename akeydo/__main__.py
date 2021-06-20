@@ -11,6 +11,7 @@ Environment Variables:
 """
 
 import asyncio
+import functools
 import logging
 import os
 import pathlib
@@ -32,10 +33,6 @@ async def service(config: pathlib.Path) -> None:
         config: A Path to a YAML configuration file to configure the service and
             plug-ins.
     """
-    logging.basicConfig(
-        level=os.environ.get("LOGLEVEL", "INFO").upper(),
-        format="[%(levelname)s] %(message)s",
-    )
     loop = asyncio.get_event_loop()
     settings = Settings(config or _DEFAULT_CONFIG_PATH)
     manager = AkeydoService(settings, *settings.enabled_plugins.values())
@@ -55,8 +52,26 @@ async def service(config: pathlib.Path) -> None:
         task.exception()
 
 
+def configure_logging():
+    logging.TRACE = 5
+    logging.addLevelName(logging.TRACE, "TRACE")
+
+    def trace(self, msg, *args, **kwargs):
+        if self.isEnabledFor(5):
+            self._log(5, msg, args, **kwargs)
+
+    logging.Logger.trace = trace
+    logging.trace = functools.partial(logging.log, logging.TRACE)
+
+    logging.basicConfig(
+        level=os.environ.get("LOGLEVEL", "INFO").upper(),
+        format="[%(levelname)s] %(message)s",
+    )
+
+
 def main():
     """The service entry point."""
+    configure_logging()
     loop = asyncio.get_event_loop()
     path = pathlib.Path(_DEFAULT_CONFIG_PATH if len(sys.argv) < 2 else sys.argv[1])
     loop.create_task(service(path))

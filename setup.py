@@ -41,6 +41,9 @@ setup(
       akeydo = akeydo.__main__:main
       [akeydo.plugins]
       devices = akeydo.plugins.devices
+      gpu = akeydo.plugins.gpu
+      cpu = akeydo.plugins.cpu
+      memory = akeydo.plugins.memory
     """,
     classifiers=[
         "Development Status :: 3 - Alpha",

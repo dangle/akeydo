@@ -6,11 +6,8 @@ Classes:
         configuring the service.
 """
 
-from typing import (
-    Iterable,
-    Optional,
-    Set,
-)
+from __future__ import annotations
+
 import functools
 import itertools
 import logging
@@ -27,6 +24,23 @@ class VirtualMachineConfig:
     _NAMESPACE = "akeydo"
     _NAMESPACE_URI = "https://dev.akeydo/xmlns/libvirt/domain/1.0"
 
+    _UNITS = {
+        "b": 1,
+        "bytes": 1,
+        "KB": 10 ** 3,
+        "k": 2 ** 10,
+        "KiB": 2 ** 10,
+        "MB": 10 ** 6,
+        "M": 2 ** 20,
+        "MiB": 2 ** 20,
+        "GB": 10 ** 9,
+        "G": 2 ** 30,
+        "GiB": 2 ** 30,
+        "TB": 10 ** 12,
+        "T": 2 ** 40,
+        "TiB": 2 ** 40,
+    }
+
     def __init__(self, xml_config: str) -> None:
         """Parse libvirt XML configuration.
 
@@ -41,8 +55,9 @@ class VirtualMachineConfig:
         root: xml.Element = xml.fromstring(xml_config)
         self.name: str = root.findtext(".//name")
         self.hugepages: bool = root.find(".//memoryBacking/hugepages") is not None
-        self.memory: int = int(root.findtext(".//memory") or "0")
+        self.memory: int = self._parse_memory(root)
         self.pinned_cpus: Set[int] = self._parse_cpusets(root)
+        self.pci_devices: Set[Tuple[int, int, int, int]] = self._parse_pci_devices(root)
         self.devices: Set[str] = self._parse_devices(root, self.name)
         self.hotkey: Optional[hotkey.Hotkey] = self._parse_hotkey(root)
 
@@ -51,7 +66,7 @@ class VirtualMachineConfig:
         """The number of 1GB hugepages necessary to allocate this VM."""
         if not self.hugepages:
             return 0
-        mem_in_mb = self.memory // 1024
+        mem_in_mb = self.memory // 1024 // 1024
         mem_in_gb = mem_in_mb // 1024
         return mem_in_gb
 
@@ -60,10 +75,9 @@ class VirtualMachineConfig:
         """The number of 2MB hugepages necessary to allocate this VM."""
         if not self.hugepages:
             return 0
-        mem_in_mb = self.memory // 1024
-        mem_in_gb = mem_in_mb // 1024
+        mem_in_mb = self.memory // 1024 // 1024
         extra_memory = mem_in_mb % 2
-        return mem_in_mb % mem_in_gb // 2 + extra_memory
+        return mem_in_mb // 2 + extra_memory
 
     @functools.cached_property
     def cpuset(self) -> int:
@@ -73,14 +87,45 @@ class VirtualMachineConfig:
             mask |= 1 << cpu
         return mask
 
+    def _parse_memory(self, root) -> int:
+        """Parse memory from memory elements.
+
+        Args:
+            root: The root element of the libvirt domain XML.
+
+        Returns: The number of bytes required by the virtual machine.
+        """
+        element = root.find(".//memory")
+        unit = element.get("unit", "b")
+        mem = int(element.text or "0")
+        return mem * self._UNITS[unit]
+
+    def _parse_pci_devices(self, root: xml.Element) -> Set[Tuple[int, int, int, int]]:
+        """Parse PCI devices from hostdev elements.
+
+        Args:
+            root: The root element of the libvirt domain XML.
+
+        Returns: A set of 4-tuples containing the integer represetations of the
+            domain, bus, slot, and function of each device.
+        """
+        return frozenset(
+            (
+                int(e.get("domain", "0"), base=16),
+                int(e.get("bus", "0"), base=16),
+                int(e.get("slot", "0"), base=16),
+                int(e.get("function", "0"), base=16),
+            )
+            for e in root.findall(".//devices/hostdev[@type='pci']/source/address")
+        )
+
     def _parse_cpusets(self, root: xml.Element) -> Set[int]:
         """Parse cpusets from vcpupin elements.
 
         Args:
             root: The root element of the libvirt domain XML.
 
-        Returns: A set containing all of the CPUs that are pinned and should be
-            shielded.
+        Returns: A set containing all of the CPUs that are pinned.
         """
         return frozenset(
             itertools.chain.from_iterable(

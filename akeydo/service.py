@@ -8,10 +8,6 @@ Classes:
 
 from __future__ import annotations
 
-from typing import (
-    List,
-    Optional,
-)
 import asyncio
 import logging
 import threading
@@ -72,7 +68,7 @@ class AkeydoService(dbus.service.ServiceInterface):
     or altering the position in the virtual machine cycle.
     """
 
-    HOST = None  # None used as a target represents the host device.
+    HOST = None  # None used as a target represents the true host device.
 
     def __init__(self, settings: Settings, *plugins) -> None:
         """Create a new D-BUS service for managing virtual machines.
@@ -84,6 +80,7 @@ class AkeydoService(dbus.service.ServiceInterface):
         """
         self._settings = settings
         self._released = False
+        self._current_host = self.HOST
         self._plugins = tuple(plugin(settings, self) for plugin in plugins)
         self._targets: List[Optional[str]] = [self.HOST]
         self._target: Optional[str] = self.HOST
@@ -109,8 +106,7 @@ class AkeydoService(dbus.service.ServiceInterface):
         logging.debug("Bus name %s granted", self._bus.unique_name)
         logging.info("Listening for libvirtd events")
         for plugin in self._plugins:
-            if hasattr(plugin, "start"):
-                plugin.start()
+            self._call_plugin_func(plugin, "start")
 
     def stop(self) -> None:
         """Stop all devices running on the service and disconnect from D-BUS."""
@@ -159,7 +155,11 @@ class AkeydoService(dbus.service.ServiceInterface):
         This is a D-BUS property that can be queried for the currently active
         target as a string.
         """
-        return self._target if not self._released else self.HOST
+        current_target = self._target or self._current_host
+        logging.trace("Current target is %s", current_target)
+        logging.trace("Current host is %s", self._current_host)
+        logging.trace("Releasted state is %s", self.released)
+        return current_target if not self.released else self._current_host
 
     @target.setter
     def target(self, val: s) -> str:
@@ -177,6 +177,9 @@ class AkeydoService(dbus.service.ServiceInterface):
         Args:
             val: The new value to set as the currently active target.
         """
+        logging.debug("Setting target to %s", val)
+        val = val or self._current_host
+        logging.debug("Using value %s for target", val)
         display = val or "host device"
         if val == self._target:
             logging.debug("%s selected but %s is already active", display, display)
@@ -185,9 +188,8 @@ class AkeydoService(dbus.service.ServiceInterface):
         with self._lock:
             self._released = False
             self._target = val
-            for plugin in reversed(self._plugins):
-                if hasattr(plugin, "stop"):
-                    plugin.target_changed(val)
+            for plugin in self._plugins:
+                self._call_plugin_func(plugin, "target_changed", val)
             self.emit_properties_changed({"Target": display})
         return self.target
 
@@ -244,8 +246,7 @@ class AkeydoService(dbus.service.ServiceInterface):
             config = VirtualMachineConfig(xml_config)
             self._targets.append(vm_name)
             for plugin in self._plugins:
-                if hasattr(plugin, "vm_prepare"):
-                    plugin.vm_prepare(vm_name, config)
+                self._call_plugin_func(plugin, "vm_prepare", vm_name, config)
             return True
         except Exception:
             logging.exception(
@@ -279,24 +280,62 @@ class AkeydoService(dbus.service.ServiceInterface):
         Returns: True if all plug-ins return successfully, or False if a plug-in
             raised an exception.
         """
-        try:
-            if vm_name not in self._targets:
-                logging.debug("Attempted to release unmanaged VM %s", vm_name)
-                return False
-            logging.info("VM %s shutting down", vm_name)
-            logging.debug(
-                "libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config
-            )
-            config = VirtualMachineConfig(xml_config)
-            self._targets.remove(vm_name)
-            if self._target == vm_name:
-                self.target = self.HOST
-            for plugin in reversed(self._plugins):
-                if hasattr(plugin, "vm_release"):
-                    plugin.vm_release(vm_name, config)
-            return True
-        except Exception:
-            logging.exception(
-                "An exception occurred while releasing a virtual machine."
-            )
+        if vm_name not in self._targets:
+            logging.debug("Attempted to release unmanaged VM %s", vm_name)
             return False
+        logging.info("VM %s shutting down", vm_name)
+        logging.debug("libvirtd: %s %s %s\n%s", vm_name, sub_op, extra_op, xml_config)
+        config = VirtualMachineConfig(xml_config)
+        self._targets.remove(vm_name)
+        if vm_name == self._current_host:
+            self.set_host()
+        if self._target == vm_name:
+            self.target = self._current_host
+        for plugin in reversed(self._plugins):
+            try:
+                self._call_plugin_func(plugin, "vm_release", vm_name, config)
+            except Exception:
+                logging.exception(
+                    "An error occurred while calling %s.%s.vm_release",
+                    plugin.__class__.__module__,
+                    plugin.__class__.__name__,
+                )
+        return True
+
+    def set_host(self, vm_name=None):
+        logging.debug("Setting host to: %s", vm_name)
+        if self.target == self._current_host:
+            logging.debug(
+                "Currently targeting the host; changing target to %s", vm_name
+            )
+            self.target = vm_name
+        self._current_host = vm_name
+        if vm_name == self.HOST:
+            self._targets.insert(0, None)
+        elif None in self._targets:
+            self._targets.remove(None)
+
+    def _call_plugin_func(self, plugin, func_name, *args):
+        if func := getattr(plugin, func_name, None):
+            logging.debug(
+                "Entering %s.%s.%s",
+                plugin.__class__.__module__,
+                plugin.__class__.__name__,
+                func_name,
+            )
+            try:
+                func(*args)
+            finally:
+                logging.debug(
+                    "Exiting %s.%s.%s",
+                    plugin.__class__.__module__,
+                    plugin.__class__.__name__,
+                    func_name,
+                )
+        else:
+            logging.debug(
+                "Plug-in %s.%s does not support %s",
+                plugin.__class__.__module__,
+                plugin.__class__.__name__,
+                func_name,
+            )

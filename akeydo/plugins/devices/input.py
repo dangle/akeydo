@@ -174,7 +174,11 @@ class ReplicatedDevice:
     @property
     def _target(self) -> Optional[evdev.device.InputDevice]:
         """Get the device for the currently active target."""
-        return self._targets.get(self._manager.target)
+        target = self._targets.get(self._manager.target)
+        logging.trace(
+            "Current target for device %s is %s", self._name, self._manager.target
+        )
+        return target
 
     @functools.cached_property
     def _delay(self) -> float:

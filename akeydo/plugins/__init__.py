@@ -8,12 +8,14 @@ else:
 from . import (
     cpu,
     devices,
+    gpu,
     memory,
 )
 
 __all__ = (
     "cpu",
     "devices",
+    "gpu",
     "installed_plugins",
     "memory",
 )

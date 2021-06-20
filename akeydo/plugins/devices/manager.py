@@ -11,6 +11,7 @@ from typing import (
     Optional,
 )
 import os
+import time
 
 from .input import ReplicatedDevice
 
@@ -74,9 +75,18 @@ class Manager:
                 os.path.basename(guest_source)[len(vm_name) + 1 :],
             )
             if source not in self._devices:
-                self._devices[source] = ReplicatedDevice(
-                    source, self._service, self._settings, self._settings.hotkeys.host
-                )
+                i = 0
+                while 1:
+                    try:
+                        self._devices[source] = ReplicatedDevice(
+                            source, self._service, self._settings, self._settings.hotkeys.host
+                        )
+                        break
+                    except IOError:
+                        i += 1
+                        if i >= 5:
+                            time.sleep(1)
+                            raise
             device = self._devices[source]
             device.add(
                 vm_name,
