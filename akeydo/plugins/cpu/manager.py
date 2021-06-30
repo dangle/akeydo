@@ -18,7 +18,7 @@ class Manager:
         """
         self._settings: Settings = settings
 
-    def vm_prepare(self, vm_name: str, config: VirtualMachineConfig) -> None:
+    async def vm_prepare(self, vm_name: str, config: VirtualMachineConfig) -> None:
         """Restrict kernel processes to pinned CPUs.
 
         If the "manage_cpu" option is enabled, it will set cpusets to restrict
@@ -34,7 +34,7 @@ class Manager:
             "Pinning CPUs: %s", ", ".join(str(c) for c in sorted(config.pinned_cpus))
         )
 
-    def vm_release(self, vm_name: str, config: VirtualMachineConfig) -> None:
+    async def vm_release(self, vm_name: str, config: VirtualMachineConfig) -> None:
         """Remove process restrictions to CPUs used by the the virtual machine.
 
         If the "manage_cpu" option is enabled, it will set cpusets to allow

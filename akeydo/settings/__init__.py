@@ -5,6 +5,8 @@ Classes:
         plug-in settings to itself.
 """
 
+from __future__ import annotations
+
 import logging
 import pathlib
 
@@ -20,7 +22,7 @@ __all__ = ("Settings",)
 class Settings:
     """A class for parsing and storing configuration options for the service."""
 
-    def __init__(self, config: pathlib.Path):
+    def __init__(self, config: pathlib.Path) -> None:
         """Parse a YAML configuration file to configure this service.
 
         Additionally, it loops over each plug-in and initializes the settings

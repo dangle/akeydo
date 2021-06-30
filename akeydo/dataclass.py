@@ -5,17 +5,20 @@ Decorators:
         `from_dict` method that can be used to pass only the keys that match the
         dataclass attributes to the constructor of the dataclass.
 """
-from typing import (
-    Any,
-    Dict,
-)
+
+from __future__ import annotations
+
 import dataclasses
+import typing
 
 __all__ = ("dataclass",)
 
 
+T = typing.TypeVar("T")
+
+
 @classmethod
-def from_dict(cls, source: Dict[str, Any]):
+def from_dict(cls: type[T], source: dict[str, Any]) -> T:
     """A method to be attached to a dataclass that instantiates from a dict.
 
     Args:
@@ -35,7 +38,7 @@ def from_dict(cls, source: Dict[str, Any]):
     )
 
 
-def dataclass(cls):
+def dataclass(cls: type[T]) -> type[T]:
     """Converts a class into a dataclass and adds the `from_dict` method."""
     inner = dataclasses.dataclass(cls)
     if not hasattr(inner, "from_dict"):

@@ -4,6 +4,8 @@ Classes:
     DbusSettings: Reads the D-BUS settings from a given dictionary.
 """
 
+from __future__ import annotations
+
 from ..dataclass import dataclass
 
 __all__ = ("DbusSettings",)

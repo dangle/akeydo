@@ -3,6 +3,7 @@ import subprocess
 
 from .base import BaseDriver
 
+
 class Driver(BaseDriver):
     _MODULES = (
         "nvidia",
@@ -11,16 +12,16 @@ class Driver(BaseDriver):
         "nvidia_uvm",
     )
 
-    def load(self):
+    def load(self) -> None:
         for module in self._MODULES:
             subprocess.call(["modprobe", module])
         self._read_xconfig()
 
-    def unload(self):
+    def unload(self) -> None:
         for module in reversed(self._MODULES):
             subprocess.call(["rmmod", module])
 
-    def _read_xconfig(self):
+    def _read_xconfig(self) -> None:
         if os.path.isfile("/usr/bin/nvidia-xconfig"):
             subprocess.run(
                 ["/usr/bin/nvidia-xconfig", "--query-gpu-info"],

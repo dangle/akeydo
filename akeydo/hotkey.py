@@ -9,11 +9,9 @@ Functions:
     parse_hotkeys: Takes an optional iterable containing string values
         representing keys and if possible returns a Hotkey.
 """
-from typing import (
-    FrozenSet,
-    Iterable,
-    Optional,
-)
+
+from __future__ import annotations
+
 import logging
 
 import evdev
@@ -24,7 +22,7 @@ __all__ = (
 )
 
 
-Hotkey = FrozenSet[int]
+Hotkey = frozenset[int]
 
 
 def parse_hotkeys(hotkey: Optional[Iterable[str]]) -> Optional[Hotkey]:

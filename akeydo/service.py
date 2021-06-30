@@ -9,6 +9,7 @@ Classes:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import threading
 
@@ -16,6 +17,7 @@ import dbus_next as dbus
 
 from .libvirt import VirtualMachineConfig
 from .settings import Settings
+from .task import create_task
 
 __all__ = ("AkeydoService",)
 
@@ -82,7 +84,7 @@ class AkeydoService(dbus.service.ServiceInterface):
         self._released = False
         self._current_host = self.HOST
         self._plugins = tuple(plugin(settings, self) for plugin in plugins)
-        self._targets: List[Optional[str]] = [self.HOST]
+        self._targets: list[Optional[str]] = [self.HOST]
         self._target: Optional[str] = self.HOST
         self._bus: Optional[dbus.aio.MessageBus] = None
         self._lock = threading.Lock()
@@ -112,8 +114,7 @@ class AkeydoService(dbus.service.ServiceInterface):
         """Stop all devices running on the service and disconnect from D-BUS."""
         try:
             for plugin in reversed(self._plugins):
-                if hasattr(plugin, "stop"):
-                    plugin.stop()
+                self._call_plugin_func(plugin, "stop")
         finally:
             self._bus.disconnect()
 
@@ -302,7 +303,19 @@ class AkeydoService(dbus.service.ServiceInterface):
                 )
         return True
 
-    def set_host(self, vm_name=None):
+    def set_host(self, vm_name: str = None) -> None:
+        """Replace the host target with the given virtual machine.
+
+        Removes the true host target from the list of targets and anything that
+        would go to the host will now go to this virtual machine. This is useful
+        for GPU passthrough when the true host no longer accepts input and the
+        virtual machine receives all input and handles the output.
+
+        Args:
+            vm_name: The name of the virtual machine that will replace the host.
+                If the value is None, the true host is added back into the list
+                of targets.
+        """
         logging.debug("Setting host to: %s", vm_name)
         if self.target == self._current_host:
             logging.debug(
@@ -315,23 +328,35 @@ class AkeydoService(dbus.service.ServiceInterface):
         elif None in self._targets:
             self._targets.remove(None)
 
-    def _call_plugin_func(self, plugin, func_name, *args):
+    def _call_plugin_func(self, plugin: object, func_name: str, *args: Any) -> None:
+        """Call the given function asyncronously on the plugin if it exists.
+
+        Args:
+            plugin: The plugin manager that will be used to call the function.
+            func_name: The name of the function to call on the plugin.
+            args: The arguments to pass to the function.
+        """
         if func := getattr(plugin, func_name, None):
-            logging.debug(
-                "Entering %s.%s.%s",
-                plugin.__class__.__module__,
-                plugin.__class__.__name__,
-                func_name,
-            )
-            try:
-                func(*args)
-            finally:
+
+            @functools.wraps(func)
+            async def trace() -> None:
                 logging.debug(
-                    "Exiting %s.%s.%s",
+                    "Entering %s.%s.%s",
                     plugin.__class__.__module__,
                     plugin.__class__.__name__,
                     func_name,
                 )
+                try:
+                    await func(*args)
+                finally:
+                    logging.debug(
+                        "Exiting %s.%s.%s",
+                        plugin.__class__.__module__,
+                        plugin.__class__.__name__,
+                        func_name,
+                    )
+
+            create_task(trace(), name=f"{plugin.__class__.__name__}.{func_name}")
         else:
             logging.debug(
                 "Plug-in %s.%s does not support %s",

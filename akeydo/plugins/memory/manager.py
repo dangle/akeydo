@@ -19,7 +19,7 @@ class Manager:
         """
         self._settings: Settings = settings
 
-    def vm_prepare(self, _: str, config: VirtualMachineConfig) -> None:
+    async def vm_prepare(self, _: str, config: VirtualMachineConfig) -> None:
         """Allocate memory for hugepages.
 
         If the "manage_hugepages" option is enabled and the virtual machine XML
@@ -35,11 +35,11 @@ class Manager:
                 the virtual machine after dividing it into 1GB chunks and then
                 dividing that into 2MB chunks.
         """
-        if not config.hugepages_1g and not config.hugepages_2m:
+        if not config.hugepages:
             return
         pre_meminfo = self._get_meminfo()
-        hugepagesz = 1048576
-        hugepages = config.hugepages_2m if hugepagesz == 2048 else config.hugepages_1g
+        hugepagesz = 1048576  # TODO: FIX HACK
+        hugepages = self.get_1g_hugepages(config.memory)
         free_hugepages = pre_meminfo["HugePages_Free"]
         if free_hugepages >= hugepages:
             return True
@@ -66,7 +66,7 @@ class Manager:
         #     post_free_hugepages,
         # )
 
-    def vm_release(self, _: str, config: VirtualMachineConfig) -> None:
+    async def vm_release(self, _: str, config: VirtualMachineConfig) -> None:
         """Deallocate memory used for hugepages by the virtual machine.
 
         If the "manage_hugepages" option is enabled and the virtual machine XML
@@ -82,11 +82,11 @@ class Manager:
                 the virtual machine after dividing it into 1GB chunks and then
                 dividing that into 2MB chunks.
         """
-        if not config.hugepages_1g and not config.hugepages_2m:
+        if not config.hugepages:
             return
         pre_meminfo = self._get_meminfo()
         hugepagesz = 1048576  # TODO: FIX HACK
-        hugepages = config.hugepages_2m if hugepagesz == 2048 else config.hugepages_1g
+        hugepages = self.get_1g_hugepages(config.memory)
         logging.info(
             "Deallocating %d hugepages of size %dkB",
             hugepages,
@@ -98,6 +98,18 @@ class Manager:
             "w",
         ) as file:
             file.write(f"{total_hugepages - hugepages}")
+
+    def get_1g_hugepages(self, size: int) -> int:
+        """The number of 1GB hugepages necessary to allocate this VM."""
+        mem_in_mb = size // 1024 // 1024
+        mem_in_gb = mem_in_mb // 1024
+        return mem_in_gb
+
+    def get_2m_hugepages(self, size: int) -> int:
+        """The number of 2MB hugepages necessary to allocate this VM."""
+        mem_in_mb = size // 1024 // 1024
+        extra_memory = mem_in_mb % 2
+        return mem_in_mb // 2 + extra_memory
 
     def _get_meminfo(self):
         with open("/proc/meminfo") as file:

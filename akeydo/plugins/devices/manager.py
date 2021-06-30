@@ -6,12 +6,8 @@ Classes:
 
 from __future__ import annotations
 
-from typing import (
-    Dict,
-    Optional,
-)
+import asyncio
 import os
-import time
 
 from .input import ReplicatedDevice
 
@@ -35,9 +31,9 @@ class Manager:
         """
         self._settings: Settings = settings
         self._service: AkeydoService = service
-        self._devices: Dict[str, ReplicatedDevice] = {}
+        self._devices: dict[str, ReplicatedDevice] = {}
 
-    def vm_prepare(self, vm_name: str, config: VirtualMachineConfig) -> None:
+    async def vm_prepare(self, vm_name: str, config: VirtualMachineConfig) -> None:
         """Create devices requested in the virtual machine's XML configuration.
 
         While parsing the XML configuration for the virtual machine all input
@@ -79,21 +75,24 @@ class Manager:
                 while 1:
                     try:
                         self._devices[source] = ReplicatedDevice(
-                            source, self._service, self._settings, self._settings.hotkeys.host
+                            source,
+                            self._service,
+                            self._settings,
+                            self._settings.hotkeys.host,
                         )
                         break
                     except IOError:
-                        i += 1
-                        if i >= 5:
-                            time.sleep(1)
+                        if i >= self._settings.devices.wait_duration:
+                            await asyncio.sleep(1)
                             raise
+                        i += 1
             device = self._devices[source]
             device.add(
                 vm_name,
                 config.hotkey or self._settings.hotkeys.virtual_machines.get(vm_name),
             )
 
-    def vm_release(self, vm_name: str, config: VirtualMachineConfig) -> None:
+    async def vm_release(self, vm_name: str, config: VirtualMachineConfig) -> None:
         """Destroy devices created for use with the virtual machine.
 
         While parsing the XML configuration for the virtual machine all input
@@ -137,12 +136,12 @@ class Manager:
                 del self._devices[source]
                 del device
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         """Stop all devices in preparation for shutting down the service."""
         for device in self._devices.values():
             device.stop()
 
-    def target_changed(self, _: Optional[str]) -> None:
+    async def target_changed(self, _: Optional[str]) -> None:
         """Ensure all devices are grabbed after the target changes."""
         for device in self._devices.values():
             device.grab()

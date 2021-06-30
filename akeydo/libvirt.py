@@ -15,7 +15,13 @@ import xml.etree.ElementTree as xml
 
 from . import hotkey
 
-__all__ = ("VirtualMachineConfig",)
+__all__ = (
+    "Device",
+    "VirtualMachineConfig",
+)
+
+
+Device = tuple[int, int, int, int]
 
 
 class VirtualMachineConfig:
@@ -56,28 +62,10 @@ class VirtualMachineConfig:
         self.name: str = root.findtext(".//name")
         self.hugepages: bool = root.find(".//memoryBacking/hugepages") is not None
         self.memory: int = self._parse_memory(root)
-        self.pinned_cpus: Set[int] = self._parse_cpusets(root)
-        self.pci_devices: Set[Tuple[int, int, int, int]] = self._parse_pci_devices(root)
-        self.devices: Set[str] = self._parse_devices(root, self.name)
+        self.pinned_cpus: set[int] = self._parse_cpusets(root)
+        self.pci_devices: set[Device] = self._parse_pci_devices(root)
+        self.devices: set[str] = self._parse_devices(root, self.name)
         self.hotkey: Optional[hotkey.Hotkey] = self._parse_hotkey(root)
-
-    @functools.cached_property
-    def hugepages_1g(self) -> int:
-        """The number of 1GB hugepages necessary to allocate this VM."""
-        if not self.hugepages:
-            return 0
-        mem_in_mb = self.memory // 1024 // 1024
-        mem_in_gb = mem_in_mb // 1024
-        return mem_in_gb
-
-    @functools.cached_property
-    def hugepages_2m(self) -> int:
-        """The number of 2MB hugepages necessary to allocate this VM."""
-        if not self.hugepages:
-            return 0
-        mem_in_mb = self.memory // 1024 // 1024
-        extra_memory = mem_in_mb % 2
-        return mem_in_mb // 2 + extra_memory
 
     @functools.cached_property
     def cpuset(self) -> int:
@@ -100,7 +88,7 @@ class VirtualMachineConfig:
         mem = int(element.text or "0")
         return mem * self._UNITS[unit]
 
-    def _parse_pci_devices(self, root: xml.Element) -> Set[Tuple[int, int, int, int]]:
+    def _parse_pci_devices(self, root: xml.Element) -> set[Device]:
         """Parse PCI devices from hostdev elements.
 
         Args:
@@ -119,7 +107,7 @@ class VirtualMachineConfig:
             for e in root.findall(".//devices/hostdev[@type='pci']/source/address")
         )
 
-    def _parse_cpusets(self, root: xml.Element) -> Set[int]:
+    def _parse_cpusets(self, root: xml.Element) -> set[int]:
         """Parse cpusets from vcpupin elements.
 
         Args:
@@ -157,7 +145,7 @@ class VirtualMachineConfig:
             logging.warning("Unable to parse cpuset %s", cpuset)
             return ()
 
-    def _parse_devices(self, root: xml.Element, name: str) -> Set[str]:
+    def _parse_devices(self, root: xml.Element, name: str) -> set[str]:
         """Parse devices to be generated for this VM.
 
         Args:
@@ -173,7 +161,7 @@ class VirtualMachineConfig:
         )
 
     @staticmethod
-    def _parse_passthrough_inputs(root: xml.Element, name: str) -> Set[str]:
+    def _parse_passthrough_inputs(root: xml.Element, name: str) -> set[str]:
         """Parse devices to be generated for this VM from libvirt devices.
 
         Args:
@@ -192,7 +180,7 @@ class VirtualMachineConfig:
         }
 
     @staticmethod
-    def _parse_qemu_arg_evdev(root: xml.Element, name: str) -> Set[str]:
+    def _parse_qemu_arg_evdev(root: xml.Element, name: str) -> set[str]:
         """Parse devices to be generated for this VM from QEMU args.
 
         This method is no longer recommended as it is adds complexity and risk

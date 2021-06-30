@@ -24,7 +24,10 @@ class Settings:
         by_id: A set of physical devices that should always be active and
             listening for hotkeys even if no virtual machine is currently using
             them.
+        wait_duration: The number of seconds to wait until a device is ready
+            before throwing an error.
     """
 
     enabled: bool = True
     by_id: FrozenSet[str] = dataclasses.field(default_factory=frozenset)
+    wait_duration: int = 10

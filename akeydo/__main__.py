@@ -10,6 +10,8 @@ Environment Variables:
     LOGLEVEL: The level of logs to output.
 """
 
+from __future__ import annotations
+
 import asyncio
 import functools
 import logging
@@ -21,6 +23,12 @@ import sys
 from .service import AkeydoService
 from .settings import Settings
 from .task import create_task
+
+__all__ = (
+    "service",
+    "configure_logging",
+    "main",
+)
 
 
 _DEFAULT_CONFIG_PATH = "/etc/akeydo.conf"
@@ -53,12 +61,14 @@ async def service(config: pathlib.Path) -> None:
 
 
 def configure_logging():
+    """Configure logging to add trace support and a basic config."""
     logging.TRACE = 5
     logging.addLevelName(logging.TRACE, "TRACE")
 
-    def trace(self, msg, *args, **kwargs):
-        if self.isEnabledFor(5):
-            self._log(5, msg, args, **kwargs)
+    def trace(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Add a class to the build-in Logger to support trace."""
+        if self.isEnabledFor(logging.TRACE):
+            self._log(logging.TRACE, msg, args, **kwargs)
 
     logging.Logger.trace = trace
     logging.trace = functools.partial(logging.log, logging.TRACE)

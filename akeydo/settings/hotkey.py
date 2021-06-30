@@ -5,14 +5,16 @@ Classes:
         configuration for the default hotkeys, virtual machine-specific hotkeys,
         and hotkeys used to send arbitrary D-BUS signals.
 """
-from typing import (
-    Dict,
-    Optional,
-)
+
+from __future__ import annotations
+
 import collections
 import dataclasses
 
-from .. import hotkey
+from ..hotkey import (
+    Hotkey,
+    parse_hotkeys,
+)
 from ..dataclass import dataclass
 
 __all__ = ("HotkeySettings",)
@@ -42,12 +44,12 @@ class HotkeySettings:
     """
 
     delay: float = 100
-    qemu: hotkey.Hotkey = frozenset((29, 97))
-    toggle: Optional[hotkey.Hotkey] = None
-    host: Optional[hotkey.Hotkey] = None
-    release: Optional[hotkey.Hotkey] = None
-    virtual_machines: Dict[str, hotkey.Hotkey] = dataclasses.field(default_factory=dict)
-    signals: Dict[str, hotkey.Hotkey] = dataclasses.field(default_factory=dict)
+    qemu: Hotkey = Hotkey((29, 97))
+    toggle: Optional[Hotkey] = None
+    host: Optional[Hotkey] = None
+    release: Optional[Hotkey] = None
+    virtual_machines: dict[str, Hotkey] = dataclasses.field(default_factory=dict)
+    signals: dict[str, Hotkey] = dataclasses.field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, source) -> None:
@@ -61,9 +63,9 @@ class HotkeySettings:
         """
         instance = cls(
             **{
-                k: {ki: hotkey.parse_hotkeys(vi) for ki, vi in v.items()}
+                k: {ki: parse_hotkeys(vi) for ki, vi in v.items()}
                 if isinstance(v, dict)
-                else hotkey.parse_hotkeys(v)
+                else parse_hotkeys(v)
                 if isinstance(v, collections.abc.Iterable)
                 else v
                 for k, v in source.items()

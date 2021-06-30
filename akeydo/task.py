@@ -5,6 +5,8 @@ Functions:
         any exception other than CancelledError and stops the running loops.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 
@@ -28,7 +30,7 @@ def handle_exception(task: asyncio.Task) -> None:
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        if logging.getLogger().level == logging.DEBUG:
+        if logging.getLogger().level <= logging.DEBUG:
             logging.exception("Exception raised by task %s", task.get_name())
         else:
             logging.error("%s", e)
