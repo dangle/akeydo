@@ -13,7 +13,20 @@ _PCI_GPU_CLASS = 30000
 
 
 class Manager:
+    _VFIO_MODULES: ClassVar[tuple[str, ...]] = (
+        "vfio_pci",
+        "vfio",
+        "vfio_iommu_type1",
+        "vfio_virqfd",
+    )
+
     def __init__(self, settings: Settings, service: AkeydoService) -> None:
+        """Initialize the plug-in.
+
+        Args:
+            settings: Global settings for hotkeys and plug-in options.
+            service: The service that initialized this plug-in.
+        """
         self._settings: Settings = settings
         self._service: AkeydoService = service
 
@@ -26,8 +39,7 @@ class Manager:
                 driver.unbind_framebuffer()
                 self._nodedev_detach(self._get_node_devices(device, config))
                 driver.unload()
-                logging.debug("Loading vfio-pci")
-                subprocess.call(["modprobe", "vfio-pci"])
+                self._load_vfio(device)
                 logging.debug("Setting %s as host", vm_name)
                 self._service.set_host(vm_name)
                 return
@@ -53,6 +65,15 @@ class Manager:
                 for line in file.readlines()
                 if (data := line.split("="))
             }
+
+    def _load_vfio(self, device):
+        logging.debug("Loading vfio-pci")
+        for module in self._VFIO_MODULES:
+            subprocess.call(["modprobe", module])
+
+    def _unload_vfio(self, device):
+        for module in reversed(self._VFIO_MODULES):
+            subprocess.call(["rmmod", module])
 
     def _get_driver(self, device):
         uevent = self._get_uevent(device)
