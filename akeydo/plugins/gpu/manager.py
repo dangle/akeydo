@@ -9,6 +9,9 @@ import traceback
 from .drivers.base import BaseDriver
 
 
+_PCI_GPU_CLASS = 30000
+
+
 class Manager:
     def __init__(self, settings: Settings, service: AkeydoService) -> None:
         self._settings: Settings = settings
@@ -41,15 +44,18 @@ class Manager:
                 self._service.set_host()
                 return
 
-    def _get_driver(self, device):
+    def _get_uevent(self, device):
         device_name = f"{device[0]:04x}:{device[1]:02x}:{device[2]:02x}.{device[3]:01x}"
         path = f"/sys/bus/pci/devices/{device_name}/uevent"
         with open(path) as file:
-            uevent = {
+            return {
                 data[0].strip(): data[1].strip()
                 for line in file.readlines()
                 if (data := line.split("="))
             }
+
+    def _get_driver(self, device):
+        uevent = self._get_uevent(device)
         try:
             logging.debug('Attempting to import driver shim "%s"', uevent["DRIVER"])
             module = importlib.import_module(
@@ -60,6 +66,11 @@ class Manager:
             logging.warning("Unable to find drivers for passthrough video card")
             logging.debug(traceback.format_exc())
             return BaseDriver()
+
+    def _is_gpu(self, device):
+        is_gpu = self._get_uevent(device).get("PCI_CLASS") == _PCI_GPU_CLASS
+        logging.debug("Device %r is GPU: %r", device, is_gpu)
+        return is_gpu
 
     def _is_boot_gpu(self, device) -> bool:
         device_name = f"{device[0]:04x}:{device[1]:02x}:{device[2]:02x}.{device[3]:01x}"
