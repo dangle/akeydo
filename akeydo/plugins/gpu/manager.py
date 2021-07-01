@@ -17,7 +17,7 @@ class Manager:
         self._settings: Settings = settings
         self._service: AkeydoService = service
 
-    def vm_prepare(self, vm_name: str, config: VirtualMachineConfig) -> None:
+    async def vm_prepare(self, vm_name: str, config: VirtualMachineConfig) -> None:
         for device in config.pci_devices:
             if self._is_boot_gpu(device):
                 driver = self._get_driver(device)
@@ -32,7 +32,7 @@ class Manager:
                 self._service.set_host(vm_name)
                 return
 
-    def vm_release(self, _: str, config: VirtualMachineConfig) -> None:
+    async def vm_release(self, _: str, config: VirtualMachineConfig) -> None:
         for device in config.pci_devices:
             if self._is_boot_gpu(device):
                 self._nodedev_reattach(self._get_node_devices(device, config))

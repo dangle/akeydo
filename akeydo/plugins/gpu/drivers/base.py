@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import os
 import time
@@ -40,3 +42,21 @@ class BaseDriver:
             time.sleep(5)
         else:
             logging.debug("Unable to disable the framebuffer")
+
+    @classmethod
+    def _has_framebuffers(cls, device) -> bool:
+        return cls._get_attached_framebuffers(device) and os.path.isfile(
+            "/sys/bus/platform/drivers/efi-framebuffer/unbind"
+        )
+
+    @classmethod
+    def _get_attached_framebuffers(cls, device) -> tuple[int, ...]:
+        device_name = f"{device[0]:04x}:{device[1]:02x}:{device[2]:02x}.{device[3]:01x}"
+        graphics_path = f"/sys/bus/pci/devices/{device_name}/graphics/"
+        if not os.path.isdir(graphics_path):
+            return ()
+        if device_name not in cls._device_framebuffers:
+            cls._device_framebuffers[device_name] = tuple(
+                int(i[2:]) for i in os.listdir(graphics_path) if i.startswith("fd")
+            )
+        return cls._device_framebuffers[device_name]
