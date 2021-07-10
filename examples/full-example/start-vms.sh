@@ -11,7 +11,7 @@ HDMI2=0x12
 DP=0x0f
 USBC=0x1b
 
-VM=($(virsh list --inactive | awk 'NR>2 { print $2 }'))
+VM=($(virsh list --inactive --name))
 
 for vm in ${VM[@]}; do
   virsh start "${vm}"
