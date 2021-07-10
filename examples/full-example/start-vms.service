@@ -1,0 +1,10 @@
+[Unit]
+Description=Starts VMs and tools
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/start-vms.sh
+
+[Install]
+WantedBy=custom.target
