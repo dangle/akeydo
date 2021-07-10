@@ -11,7 +11,7 @@ HDMI2=0x12
 DP=0x0f
 USBC=0x1b
 
-VM=( $(virsh list | awk 'NR>2 { print $2 }') )
+VM=($(virsh list --inactive | awk 'NR>2 { print $2 }'))
 
 for vm in ${VM[@]}; do
   virsh start "${vm}"
@@ -19,7 +19,7 @@ done
 
 HOST="$(virsh domifaddr "${VM[0]}" | awk '/192.168./{print substr($4, 1, length($4)-3)}')"
 
-function change_input () {
+function change_input() {
   local monitor=${1}
   local new_input=${2}
   ssh ${HOST} bash <<EOF
