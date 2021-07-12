@@ -7,4 +7,4 @@ Type=simple
 ExecStart=/usr/local/bin/start-vms.sh
 
 [Install]
-WantedBy=custom.target
+WantedBy=graphical.target
