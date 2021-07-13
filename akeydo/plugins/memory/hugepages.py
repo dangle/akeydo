@@ -74,14 +74,16 @@ class HugePages:
         if required_memory > meminfo["MemFree"]:
             if required_memory <= meminfo["MemAvailable"]:
                 logging.warn(
-                    "MemFree is insufficient to allocate %d hugepages of size %dkB."
-                    " MemAvailable may not contain sufficient contiguous blocks.",
+                    "MemFree is insufficient to allocate %d hugepages of size "
+                    "%dkB. MemAvailable may not contain sufficient contiguous"
+                    " blocks.",
                     pages,
                     self._size,
                 )
             else:
                 raise IOError(
-                    f"Insufficient available memory to allocate {pages} hugepages of size {self._size}kB"
+                    f"Insufficient available memory to allocate {pages} "
+                    f"hugepages of size {self._size}kB"
                 )
 
     async def _wait_for_allocation(self, allocated, pages):
