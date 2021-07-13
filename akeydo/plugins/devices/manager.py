@@ -83,8 +83,8 @@ class Manager:
                         break
                     except IOError:
                         if i >= self._settings.devices.wait_duration:
-                            await asyncio.sleep(1)
                             raise
+                        await asyncio.sleep(1)
                         i += 1
             device = self._devices[source]
             device.add(
