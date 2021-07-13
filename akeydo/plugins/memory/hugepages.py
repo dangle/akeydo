@@ -10,9 +10,10 @@ class HugePageSize:
 
 
 class HugePages:
-    def __init__(self, size=HugePageSize.HUGEPAGES_1G, use_available=False) -> None:
+    _WAIT_FOR_ALLOCATION = 30
+
+    def __init__(self, size=HugePageSize.HUGEPAGES_1G) -> None:
         self._size = size
-        self._use_available = use_available
 
     @property
     def allocated(self) -> int:
@@ -25,18 +26,8 @@ class HugePages:
             return int(file.readlines()[0])
 
     async def allocate(self, bytes_: int) -> None:
-        meminfo = self._get_meminfo()
-        free_memory = meminfo["MemAvailable" if self._use_available else "MemFree"]
         pages = self._get_pages(bytes_)
-        if pages * self._size > free_memory:
-            logging.debug(
-                "Insufficient free memory to allocate %d hugepages of size %dkB",
-                pages,
-                self._size,
-            )
-            raise IOError(
-                f"Insufficient free memory to allocate {pages} hugepages of size {self._size}kB"
-            )
+        self._assert_memory(pages)
         logging.info(
             "Allocating %d new hugepages of size %dkB",
             pages,
@@ -45,11 +36,7 @@ class HugePages:
         allocated = self.allocated
         with open(f"{self._base_path}/nr_hugepages", "w") as file:
             file.write(f"{allocated + pages}")
-        for _ in range(30):
-            if self.allocated >= allocated + pages:
-                return
-            asyncio.sleep(1)
-        raise IOError(f"Failed to allocate {pages} hugepages of size {self._size}kB")
+        await self._wait_for_allocation(allocated, pages)
 
     def deallocate(self, bytes_: int) -> None:
         allocated = self.allocated
@@ -80,3 +67,30 @@ class HugePages:
     def _get_pages(self, bytes_: int) -> int:
         mem_in_kb = bytes_ // 1024 + bytes_ // 1024 % 2
         return mem_in_kb // self._size + mem_in_kb // 1024 % 2
+
+    def _assert_memory(self, pages: int) -> None:
+        meminfo = self._get_meminfo()
+        required_memory = pages * self._size
+        if required_memory > meminfo["MemFree"]:
+            if required_memory <= meminfo["MemAvailable"]:
+                logging.warn(
+                    "MemFree is insufficient to allocate %d hugepages of size %dkB."
+                    " MemAvailable may not contain sufficient contiguous blocks.",
+                    pages,
+                    self._size,
+                )
+            else:
+                raise IOError(
+                    f"Insufficient available memory to allocate {pages} hugepages of size {self._size}kB"
+                )
+
+    async def _wait_for_allocation(self, allocated, pages):
+        if self.allocated < allocated + pages:
+            for _ in range(self._WAIT_FOR_ALLOCATION):
+                asyncio.sleep(1)
+                if self.allocated >= allocated + pages:
+                    return
+            raise IOError(
+                f"Failed to allocate {pages} hugepages of size {self._size}kB "
+                f"after {self._WAIT_FOR_ALLOCATION}s"
+            )
