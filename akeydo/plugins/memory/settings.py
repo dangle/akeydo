@@ -17,3 +17,4 @@ class Settings:
     """
 
     enabled: bool = False
+    wait_duration: int = 10

@@ -84,7 +84,9 @@ class Manager:
         mem_in_kb = memory // 1024 + memory // 1024 % 2
         if mem_in_kb >= hugepages.HugePageSize.HUGEPAGES_1G:
             return hugepages.HugePages()
-        return hugepages.HugePages(hugepages.HugePageSize.HUGEPAGES_2M)
+        return hugepages.HugePages(
+            hugepages.HugePageSize.HUGEPAGES_2M, self._settings.memory.wait_duration
+        )
 
     def _sync(self) -> None:
         subprocess.run(["sync"], capture_output=True)

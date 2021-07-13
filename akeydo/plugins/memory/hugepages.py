@@ -10,10 +10,13 @@ class HugePageSize:
 
 
 class HugePages:
-    _WAIT_FOR_ALLOCATION = 30
+    _WAIT_FOR_ALLOCATION = 10
 
-    def __init__(self, size=HugePageSize.HUGEPAGES_1G) -> None:
+    def __init__(self, size=HugePageSize.HUGEPAGES_1G, wait_duration=None) -> None:
         self._size = size
+        self._wait_duration = (
+            wait_duration if wait_duration is not None else self._WAIT_FOR_ALLOCATION
+        )
 
     @property
     def allocated(self) -> int:
@@ -88,11 +91,11 @@ class HugePages:
 
     async def _wait_for_allocation(self, allocated, pages):
         if self.allocated < allocated + pages:
-            for _ in range(self._WAIT_FOR_ALLOCATION):
+            for _ in range(self._wait_duration):
                 asyncio.sleep(1)
                 if self.allocated >= allocated + pages:
                     return
             raise IOError(
                 f"Failed to allocate {pages} hugepages of size {self._size}kB "
-                f"after {self._WAIT_FOR_ALLOCATION}s"
+                f"after {self._wait_duration}s"
             )
