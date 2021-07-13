@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 
@@ -23,7 +24,7 @@ class HugePages:
         with open(f"{self._base_path}/free_hugepages") as file:
             return int(file.readlines()[0])
 
-    def allocate(self, bytes_: int) -> bool:
+    async def allocate(self, bytes_: int) -> None:
         meminfo = self._get_meminfo()
         free_memory = meminfo["MemAvailable" if self._use_available else "MemFree"]
         pages = self._get_pages(bytes_)
@@ -33,7 +34,9 @@ class HugePages:
                 pages,
                 self._size,
             )
-            return False
+            raise IOError(
+                f"Insufficient free memory to allocate {pages} hugepages of size {self._size}kB"
+            )
         logging.info(
             "Allocating %d new hugepages of size %dkB",
             pages,
@@ -42,8 +45,11 @@ class HugePages:
         allocated = self.allocated
         with open(f"{self._base_path}/nr_hugepages", "w") as file:
             file.write(f"{allocated + pages}")
-        if self.allocated < allocated + pages:
-            return False
+        for _ in range(30):
+            if self.allocated >= allocated + pages:
+                return
+            asyncio.sleep(1)
+        raise IOError(f"Failed to allocate {pages} hugepages of size {self._size}kB")
 
     def deallocate(self, bytes_: int) -> None:
         allocated = self.allocated

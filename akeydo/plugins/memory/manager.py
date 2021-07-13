@@ -40,7 +40,7 @@ class Manager:
             self._sync()
             self._drop_caches()
             self._compact_memory()
-            self._allocate(config.memory)
+            await self._allocate(config.memory)
 
     async def vm_release(self, _: str, config: VirtualMachineConfig) -> None:
         """Deallocate memory used for hugepages by the virtual machine.
@@ -61,10 +61,9 @@ class Manager:
         if config.hugepages:
             self._deallocate(config.memory)
 
-    def _allocate(self, memory: int) -> None:
+    async def _allocate(self, memory: int) -> None:
         driver = self._get_hugepages_driver(memory)
-        if not driver.allocate(memory):
-            raise RuntimeError("Unable to allocate free pages")
+        await driver.allocate(memory)
 
     def _deallocate(self, memory: int) -> None:
         driver = self._get_hugepages_driver(memory)
@@ -76,13 +75,13 @@ class Manager:
             return hugepages.HugePages()
         return hugepages.HugePages(hugepages.HugePageSize.HUGEPAGES_2M)
 
-    def _sync(self):
+    def _sync(self) -> None:
         subprocess.run(["sync"], capture_output=True)
 
-    def _drop_caches(self):
+    def _drop_caches(self) -> None:
         with open("/proc/sys/vm/drop_caches", "w") as file:
             file.write("3")
 
-    def _compact_memory(self):
+    def _compact_memory(self) -> None:
         with open("/proc/sys/vm/compact_memory", "w") as file:
             file.write("1")
