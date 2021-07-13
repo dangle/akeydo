@@ -6,8 +6,9 @@ Classes:
 
 from __future__ import annotations
 
-import logging
 import subprocess
+
+from . import hugepages
 
 
 class Manager:
@@ -35,36 +36,11 @@ class Manager:
                 the virtual machine after dividing it into 1GB chunks and then
                 dividing that into 2MB chunks.
         """
-        if not config.hugepages:
-            return
-        pre_meminfo = self._get_meminfo()
-        hugepagesz = 1048576  # TODO: FIX HACK
-        hugepages = self.get_1g_hugepages(config.memory)
-        free_hugepages = pre_meminfo["HugePages_Free"]
-        if free_hugepages >= hugepages:
-            return True
-        logging.info(
-            "Allocating %d new hugepages of size %dkB",
-            hugepages,
-            hugepagesz,
-        )
-        total_hugepages = pre_meminfo["HugePages_Total"]
-        self._compact()
-        with open(
-            f"/sys/kernel/mm/hugepages/hugepages-{hugepagesz}kB/nr_hugepages",
-            "w",
-        ) as file:
-            file.write(f"{total_hugepages + hugepages}")
-        # post_meminfo = self._get_meminfo()
-        # post_free_hugepages = post_meminfo["HugePages_Free"]
-        # if post_free_hugepages >= hugepages:
-        #     return True
-        # logging.error("Unable to allocate sufficient hugepages")
-        # logging.debug(
-        #     "Expected at least %d free hugepages, but found %d",
-        #     hugepages,
-        #     post_free_hugepages,
-        # )
+        if config.hugepages:
+            self._sync()
+            self._drop_caches()
+            self._compact_memory()
+            self._allocate(config.memory)
 
     async def vm_release(self, _: str, config: VirtualMachineConfig) -> None:
         """Deallocate memory used for hugepages by the virtual machine.
@@ -82,53 +58,31 @@ class Manager:
                 the virtual machine after dividing it into 1GB chunks and then
                 dividing that into 2MB chunks.
         """
-        if not config.hugepages:
-            return
-        pre_meminfo = self._get_meminfo()
-        hugepagesz = 1048576  # TODO: FIX HACK
-        hugepages = self.get_1g_hugepages(config.memory)
-        logging.info(
-            "Deallocating %d hugepages of size %dkB",
-            hugepages,
-            hugepagesz,
-        )
-        total_hugepages = pre_meminfo["HugePages_Total"]
-        with open(
-            f"/sys/kernel/mm/hugepages/hugepages-{hugepagesz}kB/nr_hugepages",
-            "w",
-        ) as file:
-            file.write(f"{total_hugepages - hugepages}")
+        if config.hugepages:
+            self._deallocate(config.memory)
 
-    def get_1g_hugepages(self, size: int) -> int:
-        """The number of 1GB hugepages necessary to allocate this VM."""
-        mem_in_mb = size // 1024 // 1024
-        mem_in_gb = mem_in_mb // 1024
-        return mem_in_gb
+    def _allocate(self, memory: int) -> None:
+        driver = self._get_hugepages_driver(memory)
+        if not driver.allocate(memory):
+            raise RuntimeError("Unable to allocate free pages")
 
-    def get_2m_hugepages(self, size: int) -> int:
-        """The number of 2MB hugepages necessary to allocate this VM."""
-        mem_in_mb = size // 1024 // 1024
-        extra_memory = mem_in_mb % 2
-        return mem_in_mb // 2 + extra_memory
+    def _deallocate(self, memory: int) -> None:
+        driver = self._get_hugepages_driver(memory)
+        driver.deallocate(memory)
 
-    def _get_meminfo(self):
-        with open("/proc/meminfo") as file:
-            raw_meminfo = file.readlines()
-        meminfo = {
-            data[0]: int(data[1])
-            for line in raw_meminfo
-            if (data := line.replace(":", "").split())
-        }
-        # TODO: FIX HACK
-        with open("/sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages") as file:
-            val = file.readlines()
-            meminfo["HugePages_Total"] = int(val[0])
-        logging.debug("Memory info: %r", meminfo)
-        return meminfo
+    def _get_hugepages_driver(self, memory: int) -> hugepages.HugePages:
+        mem_in_kb = memory // 1024 + memory // 1024 % 2
+        if mem_in_kb >= hugepages.HugePageSize.HUGEPAGES_1G:
+            return hugepages.HugePages()
+        return hugepages.HugePages(hugepages.HugePageSize.HUGEPAGES_2M)
 
-    def _compact(self):
+    def _sync(self):
         subprocess.run(["sync"], capture_output=True)
+
+    def _drop_caches(self):
         with open("/proc/sys/vm/drop_caches", "w") as file:
             file.write("3")
+
+    def _compact_memory(self):
         with open("/proc/sys/vm/compact_memory", "w") as file:
             file.write("1")
