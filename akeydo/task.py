@@ -38,7 +38,6 @@ def handle_exception(task: asyncio.Task) -> None:
         task_loop = task.get_loop()
         if task_loop is not context_loop:
             task_loop.stop()
-        context_loop.stop()
 
 
 def create_task(coro, *, name=None) -> asyncio.Task:
