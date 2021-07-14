@@ -7,7 +7,9 @@ Classes:
 from __future__ import annotations
 
 import functools
+import importlib
 import logging
+import traceback
 
 from ...system import system
 
@@ -50,13 +52,13 @@ class Manager:
             system.reset("/proc/sys/kernel/watchdog")
             system.reset("/sys/bus/workqueue/devices/writeback/numa")
 
-    @functools.cached_property
-    def _is_cgroups_v2(self):
+    @functools.cache
+    def _get_cgroups_mount(self):
         with open("/proc/mounts") as file:
             for line in file.readlines():
-                if line.startswith("cgroups2 /sys/fs/cgroup"):
-                    return True
-        return False
+                if line.startswith("cgroup"):
+                    mount_options = line.split()
+                    return mount_options[0], mount_options[1]
 
     @functools.cached_property
     def _cpu_cores(self):
@@ -67,8 +69,14 @@ class Manager:
 
     @functools.cached_property
     def _driver(self):
-        if self._is_cgroups_v2:
-            from .drivers.systemd import Driver
-        else:
-            from .drivers.cset import Driver
-        return Driver(self._cpu_cores)
+        version, path = self._get_cgroups_mount()
+        logging.debug('Attempting to import cgroup driver shim "%s"', version)
+        try:
+            module = importlib.import_module(
+                f".drivers.{version}", __name__.rsplit(".", 1)[0]
+            )
+            return module.Driver(self._cpu_cores, path)
+        except ImportError:
+            logging.error("cgroups are not mounted")
+            logging.debug(traceback.format_exc())
+            raise RuntimeError("cgroups are not mounted")
