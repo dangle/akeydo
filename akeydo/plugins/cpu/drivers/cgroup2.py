@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import logging
+
 from ....system import system
 
 
@@ -26,4 +30,7 @@ class Driver:
         host_cpus = self._all_cpus - self._vm_cpus
         config = ",".join(host_cpus)
         for cgroup in self._HOST_CGROUPS:
+            logging.debug(
+                'Writing "%s" to %s', config, f"{self._path}/{cgroup}/cpuset.cpus"
+            )
             system.write(f"{self._path}/{cgroup}/cpuset.cpus", config)
