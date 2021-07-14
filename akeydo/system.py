@@ -12,7 +12,7 @@ class _System:
             file.write(f"{value}")
 
     def set(self, path: str, value, parse=None):
-        self._values[path] = self.get(path, parse)
+        self._values[path] = self.read(path, parse)
         self.write(path, value)
         return self._values[path]
 
