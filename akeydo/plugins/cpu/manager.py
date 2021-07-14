@@ -9,6 +9,8 @@ from __future__ import annotations
 import functools
 import logging
 
+from ...system import system
+
 
 class Manager:
     def __init__(self, settings: Settings, *_) -> None:
@@ -18,8 +20,7 @@ class Manager:
             settings: Global settings for hotkeys and plug-in options.
         """
         self._settings: Settings = settings
-        self._driver = self._get_driver()
-        self._shielded_vms = 0
+        self._shielded_vms: int = 0
 
     async def vm_prepare(self, _: str, config: VirtualMachineConfig) -> None:
         """Restrict kernel processes to pinned CPUs."""
@@ -28,10 +29,11 @@ class Manager:
         logging.info(
             "Pinning CPUs: %s", ", ".join(str(c) for c in sorted(config.pinned_cpus))
         )
-        driver = self._get_driver()
-        driver.shield_cpu(*config.pinned_cpus)
+        self._driver.shield_cpu(*config.pinned_cpus)
         if not self._shielded_vms:
-            pass
+            system.set("/proc/sys/vm/stat_interval", 120)
+            system.set("/proc/sys/kernel/watchdog", 0)
+            system.set("/sys/bus/workqueue/devices/writeback/numa", 1)
         self._shielded_vms += 1
 
     async def vm_release(self, _: str, config: VirtualMachineConfig) -> None:
@@ -41,11 +43,12 @@ class Manager:
         logging.info(
             "Unpinning CPUs: %s", ", ".join(str(c) for c in sorted(config.pinned_cpus))
         )
-        driver = self._get_driver()
-        driver.unshield_cpu(*config.pinned_cpus)
+        self._driver.unshield_cpu(*config.pinned_cpus)
         self._shielded_vms -= 1
         if not self._shielded_vms:
-            pass
+            system.reset("/proc/sys/vm/stat_interval")
+            system.reset("/proc/sys/kernel/watchdog")
+            system.reset("/sys/bus/workqueue/devices/writeback/numa")
 
     @functools.cached_property
     def _is_cgroups_v2(self):
