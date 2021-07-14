@@ -52,7 +52,7 @@ class Manager:
 
     @functools.cached_property
     def _is_cgroups_v2(self):
-        with open("/proc/mount") as file:
+        with open("/proc/mounts") as file:
             for line in file.readlines():
                 if line.startswith("cgroups2 /sys/fs/cgroup"):
                     return True
