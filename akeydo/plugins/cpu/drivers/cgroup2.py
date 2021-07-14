@@ -9,7 +9,7 @@ class Driver:
     )
 
     def __init__(self, cores: int, path: str) -> None:
-        self._all_cpus = set(range(self.cores))
+        self._all_cpus = frozenset(range(cores))
         self._vm_cpus = set()
         self._path = path
         system.write(f"{self._path}/cgroup.subtree_control", "+cpuset")
