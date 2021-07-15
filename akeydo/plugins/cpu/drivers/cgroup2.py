@@ -28,6 +28,12 @@ class Driver:
 
     def _set_host_cpus(self) -> str:
         host_cpus = self._all_cpus - self._vm_cpus
+        logging.debug(
+            "All CPUs: %r\nVM CPUs: %r\nHOST CPUs: %s",
+            self._all_cpus,
+            self._vm_cpus,
+            host_cpus,
+        )
         config = ",".join(host_cpus)
         for cgroup in self._HOST_CGROUPS:
             logging.debug(
