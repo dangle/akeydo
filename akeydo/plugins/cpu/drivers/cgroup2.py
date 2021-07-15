@@ -34,7 +34,7 @@ class Driver:
             self._vm_cpus,
             host_cpus,
         )
-        config = ",".join(host_cpus)
+        config = ",".join(f"{i}" for i in host_cpus)
         for cgroup in self._HOST_CGROUPS:
             logging.debug(
                 'Writing "%s" to %s', config, f"{self._path}/{cgroup}/cpuset.cpus"
