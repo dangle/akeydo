@@ -29,7 +29,7 @@ class Driver:
     def _set_host_cpus(self) -> str:
         host_cpus = (self._all_cpus - self._vm_cpus) | {0}
         logging.debug(
-            "All CPUs: %r\nVM CPUs: %r\nHOST CPUs: %s",
+            "All CPUs: %r\nVM CPUs: %r\Host CPUs: %s",
             self._all_cpus,
             self._vm_cpus,
             host_cpus,
