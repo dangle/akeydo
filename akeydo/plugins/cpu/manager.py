@@ -63,9 +63,9 @@ class Manager:
     @functools.cached_property
     def _cpu_cores(self):
         with open("/proc/cpuinfo") as file:
-            for line in file.readlines():
-                if line.startswith("cpu cores"):
-                    return int(line.split(":")[1].strip())
+            return len(
+                line for line in file.readlines() if line.startswith("processor")
+            )
 
     @functools.cached_property
     def _driver(self):
