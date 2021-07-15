@@ -64,7 +64,7 @@ class Manager:
     def _cpu_cores(self):
         with open("/proc/cpuinfo") as file:
             return len(
-                line for line in file.readlines() if line.startswith("processor")
+                [line for line in file.readlines() if line.startswith("processor")]
             )
 
     @functools.cached_property
