@@ -6,7 +6,7 @@ Classes:
 
 from __future__ import annotations
 
-import subprocess
+import os
 
 from . import hugepages
 
@@ -42,7 +42,7 @@ class Manager:
                 dividing that into 2MB chunks.
         """
         if config.hugepages:
-            self._sync()
+            os.sync()
             self._drop_caches()
             self._compact_memory()
             await self._allocate(config.memory)
@@ -87,9 +87,6 @@ class Manager:
         return hugepages.HugePages(
             hugepages.HugePageSize.HUGEPAGES_2M, self._settings.memory.wait_duration
         )
-
-    def _sync(self) -> None:
-        subprocess.run(["sync"], capture_output=True)
 
     def _drop_caches(self) -> None:
         with open("/proc/sys/vm/drop_caches", "w") as file:
