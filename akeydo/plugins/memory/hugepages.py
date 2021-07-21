@@ -10,7 +10,7 @@ class HugePageSize:
 
 
 class HugePages:
-    _WAIT_FOR_ALLOCATION = 10
+    _WAIT_FOR_ALLOCATION = 60
 
     def __init__(self, size=HugePageSize.HUGEPAGES_1G, wait_duration=None) -> None:
         self._size = size
