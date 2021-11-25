@@ -42,7 +42,7 @@ async def service(config: pathlib.Path) -> None:
             plug-ins.
     """
     loop = asyncio.get_event_loop()
-    settings = Settings(config or _DEFAULT_CONFIG_PATH)
+    settings = Settings(config)
     manager = AkeydoService(settings, *settings.enabled_plugins.values())
 
     def signal_handler() -> None:

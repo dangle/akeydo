@@ -184,6 +184,8 @@ class AkeydoService(dbus.service.ServiceInterface):
         display = val or "host device"
         if val == self._target:
             logging.debug("%s selected but %s is already active", display, display)
+            if self.released:
+                self.released = False
             return self.target
         logging.info("%s selected", display)
         with self._lock:
