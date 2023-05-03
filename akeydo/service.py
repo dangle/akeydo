@@ -156,7 +156,7 @@ class AkeydoService(dbus.service.ServiceInterface):
         This is a D-BUS property that can be queried for the currently active
         target as a string.
         """
-        current_target = self._target or self._current_host
+        current_target = self._target or self._current_host or ""
         logging.trace("Current target is %s", current_target)
         logging.trace("Current host is %s", self._current_host)
         logging.trace("Releasted state is %s", self.released)
