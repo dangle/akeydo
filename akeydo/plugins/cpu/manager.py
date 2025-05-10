@@ -35,7 +35,7 @@ class Manager:
         if not self._shielded_vms:
             system.set("/proc/sys/vm/stat_interval", 120)
             system.set("/proc/sys/kernel/watchdog", 0)
-            system.set("/sys/bus/workqueue/devices/writeback/numa", 1)
+#            system.set("/sys/bus/workqueue/devices/writeback/numa", 1)
         self._shielded_vms += 1
 
     async def vm_release(self, _: str, config: VirtualMachineConfig) -> None:

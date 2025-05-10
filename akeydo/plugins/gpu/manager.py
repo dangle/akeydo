@@ -77,13 +77,15 @@ class Manager:
 
     def _get_driver(self, device):
         uevent = self._get_uevent(device)
+        if 'DRIVER' not in uevent:
+            return BaseDriver()
         try:
-            logging.debug('Attempting to import driver shim "%s"', uevent["DRIVER"])
+            logging.debug('Attempting to import driver shim "%s"', uevent.get("DRIVER", "Unknown"))
             module = importlib.import_module(
-                f".drivers.{uevent['DRIVER']}", __name__.rsplit(".", 1)[0]
+                f".drivers.{uevent.get('DRIVER', "")}", __name__.rsplit(".", 1)[0]
             )
             return module.Driver()
-        except (ImportError, KeyError):
+        except:
             logging.warning("Unable to find drivers for passthrough video card")
             logging.debug(traceback.format_exc())
             return BaseDriver()
