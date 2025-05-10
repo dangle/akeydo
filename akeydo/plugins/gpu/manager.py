@@ -40,6 +40,7 @@ class Manager:
                 self._nodedev_detach(self._get_node_devices(device, config))
                 driver.unload()
                 self._load_vfio(device)
+            else:
                 logging.debug("Setting %s as host", vm_name)
                 self._service.set_host(vm_name)
                 return
