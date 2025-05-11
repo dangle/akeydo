@@ -54,6 +54,7 @@ class Manager:
                 driver.bind_vtcons()
                 driver.bind_framebuffer()
                 self._start_display_manager()
+            else:
                 self._service.set_host()
                 return
 
